@@ -12,7 +12,7 @@ function wsUrl(path = '/ws') {
   return `${wsProto}//${host}${path}`;
 }
 
-type Role = 'host' | 'viewer';
+type Role = 'host' | 'viewer' | 'guest';
 
 type JoinedStreamMsg = {
   type: 'joined_stream';
@@ -45,7 +45,10 @@ type ServerMsg =
   | IceMsg
   | { type: 'participant_count_update'; streamId: string; count: number }
   | { type: 'connection_echo_test'; [k: string]: any }
-  | { type: 'pong'; ts: number };
+  | { type: 'pong'; ts: number }
+  | { type: 'cohost_request'; fromUserId: string; streamId: string }
+  | { type: 'cohost_accepted'; streamId: string }
+  | { type: 'cohost_declined'; streamId: string };
 
 const ICE_CONFIG: RTCConfiguration = {
   iceServers: [
@@ -82,9 +85,12 @@ export default function TestHarness() {
   const localStreamRef = useRef<MediaStream | null>(null);
   const hostPcByViewer = useRef<Map<string, RTCPeerConnection>>(new Map());
   const viewerPcRef = useRef<RTCPeerConnection | null>(null);
+  const guestPcRef = useRef<RTCPeerConnection | null>(null);
   const heartbeatIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
   const isHost = role === 'host';
+  const isGuest = role === 'guest';
+  const isViewer = role === 'viewer';
 
   useEffect(() => {
     console.log('🧪 HARNESS READY', {
@@ -101,13 +107,14 @@ export default function TestHarness() {
       video: true,
       audio: true
     });
-    s.getTracks().forEach(t => console.log(`${isHost ? 'Host' : 'Viewer'}: 🎥 track`, t.kind));
+    const roleLabel = isHost ? 'Host' : isGuest ? 'Guest' : 'Viewer';
+    s.getTracks().forEach(t => console.log(`${roleLabel}: 🎥 track`, t.kind));
     localStreamRef.current = s;
     if (localVideoRef.current) {
       localVideoRef.current.srcObject = s;
       await localVideoRef.current.play().catch(() => {});
     }
-    console.log(`Host: 🎥 Local tracks ready: ${s.getTracks().length}`);
+    console.log(`${roleLabel}: 🎥 Local tracks ready: ${s.getTracks().length}`);
     setHasLocalTracks(true);
     return s;
   }
@@ -161,6 +168,32 @@ export default function TestHarness() {
         case 'pong':
           // Heartbeat response received
           break;
+        case 'cohost_request': {
+          // Host receives co-host request from a viewer
+          if (!isHost) return;
+          console.log('🎤 Host: Received co-host request from:', data.fromUserId);
+          // Auto-accept for Phase 2 testing. Phase 4 will add UI prompt
+          wsRef.current?.send(JSON.stringify({
+            type: 'cohost_accept',
+            streamId,
+            guestUserId: data.fromUserId
+          }));
+          console.log('✅ Host: Auto-accepted co-host request from:', data.fromUserId);
+          break;
+        }
+        case 'cohost_accepted': {
+          // Viewer promoted to Guest
+          if (!isGuest && !isViewer) return;
+          console.log('🎤 Guest: Co-host request accepted! Becoming Guest...');
+          setRole('guest');
+          // Guest should now initiate bidirectional connection with Host
+          await startGuestOfferToHost();
+          break;
+        }
+        case 'cohost_declined': {
+          console.log('❌ Co-host request declined');
+          break;
+        }
         case 'joined_stream': {
           if (!isHost) return;
           const viewerId = String((data as JoinedStreamMsg).userId ?? '');
@@ -173,26 +206,45 @@ export default function TestHarness() {
           break;
         }
         case 'webrtc_offer': {
-          if (isHost) return;
           const msg = data as OfferMsg;
-          console.log(`Viewer: 📥 RECEIVED webrtc_offer from ${msg.fromUserId}`, {
-            sdpLen: msg.sdp?.sdp?.length
-          });
-          await onViewerReceiveOffer(msg);
+          if (isHost) {
+            // Host can receive offers from Guest (bidirectional)
+            console.log(`Host: 📥 RECEIVED webrtc_offer from ${msg.fromUserId} (likely Guest)`, {
+              sdpLen: msg.sdp?.sdp?.length
+            });
+            await onHostReceiveGuestOffer(msg);
+          } else {
+            console.log(`Viewer: 📥 RECEIVED webrtc_offer from ${msg.fromUserId}`, {
+              sdpLen: msg.sdp?.sdp?.length
+            });
+            await onViewerReceiveOffer(msg);
+          }
           break;
         }
         case 'webrtc_answer': {
-          if (!isHost) return;
           const msg = data as AnswerMsg;
-          const pc = hostPcByViewer.current.get(String(msg.fromUserId));
-          if (!pc) {
-            console.warn('No PC for answer from', msg.fromUserId);
-            return;
+          if (isHost) {
+            const pc = hostPcByViewer.current.get(String(msg.fromUserId));
+            if (!pc) {
+              console.warn('No PC for answer from', msg.fromUserId);
+              return;
+            }
+            await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
+            console.log(
+              `Host: ✅ Host setRemoteDescription(answer) for ${msg.fromUserId}`
+            );
+          } else if (isGuest) {
+            // Guest receives answer from Host
+            const pc = guestPcRef.current;
+            if (!pc) {
+              console.warn('No Guest PC for answer');
+              return;
+            }
+            await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
+            console.log(
+              `Guest: ✅ Guest setRemoteDescription(answer) from Host`
+            );
           }
-          await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
-          console.log(
-            `Host: ✅ Host setRemoteDescription(answer) for ${msg.fromUserId}`
-          );
           break;
         }
         case 'ice_candidate': {
@@ -201,6 +253,11 @@ export default function TestHarness() {
             const pc = hostPcByViewer.current.get(String(msg.fromUserId));
             if (pc)
               await pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
+          } else if (isGuest) {
+            if (guestPcRef.current)
+              await guestPcRef.current.addIceCandidate(
+                new RTCIceCandidate(msg.candidate)
+              );
           } else {
             if (viewerPcRef.current)
               await viewerPcRef.current.addIceCandidate(
@@ -250,8 +307,8 @@ export default function TestHarness() {
     };
 
     const offer = await pc.createOffer({
-      offerToReceiveAudio: false,
-      offerToReceiveVideo: false
+      offerToReceiveAudio: true,
+      offerToReceiveVideo: true
     });
     await pc.setLocalDescription(offer);
     console.log(`Host: 📤 SENDING webrtc_offer to ${viewerId}`, {
@@ -315,6 +372,113 @@ export default function TestHarness() {
     );
   }
 
+  async function onHostReceiveGuestOffer(msg: OfferMsg) {
+    // Host receives offer from Guest (bidirectional connection)
+    const local = await ensureLocalTracks();
+    let pc = hostPcByViewer.current.get(msg.fromUserId);
+    
+    if (!pc) {
+      pc = new RTCPeerConnection(ICE_CONFIG);
+      hostPcByViewer.current.set(msg.fromUserId, pc);
+
+      // Host sends tracks to Guest
+      local.getTracks().forEach(t => pc!.addTrack(t, local));
+
+      // Host receives tracks from Guest
+      pc.ontrack = ev => {
+        console.log('📺 Host received track from Guest:', ev.streams[0]);
+        // For Phase 3, we'll fan-out Guest tracks to Viewers
+        // For now, just log
+      };
+
+      pc.onicecandidate = ev => {
+        if (ev.candidate && wsRef.current) {
+          wsRef.current.send(
+            JSON.stringify({
+              type: 'ice_candidate',
+              toUserId: msg.fromUserId,
+              fromUserId: userId,
+              candidate: ev.candidate.toJSON()
+            })
+          );
+        }
+      };
+
+      pc.onconnectionstatechange = () => {
+        console.log('🧭 Host-Guest pc state:', pc!.connectionState);
+      };
+    }
+
+    await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
+    const answer = await pc.createAnswer();
+    await pc.setLocalDescription(answer);
+    console.log(`Host: 📤 SENDING webrtc_answer to Guest ${msg.fromUserId}`, {
+      sdpLen: answer.sdp?.length
+    });
+    wsRef.current?.send(
+      JSON.stringify({
+        type: 'webrtc_answer',
+        toUserId: msg.fromUserId,
+        fromUserId: userId,
+        sdp: answer
+      })
+    );
+  }
+
+  async function startGuestOfferToHost() {
+    // Guest creates bidirectional connection with Host
+    const local = await ensureLocalTracks();
+    const pc = new RTCPeerConnection(ICE_CONFIG);
+    guestPcRef.current = pc;
+
+    // Guest sends their tracks to Host
+    local.getTracks().forEach(t => pc.addTrack(t, local));
+
+    // Guest receives tracks from Host
+    pc.ontrack = ev => {
+      if (remoteVideoRef.current) {
+        remoteVideoRef.current.srcObject = ev.streams[0];
+        remoteVideoRef.current.play().catch(() => {});
+      }
+      console.log('📺 Guest attached Host remote stream');
+    };
+
+    pc.onicecandidate = ev => {
+      if (ev.candidate && wsRef.current) {
+        const msg = {
+          type: 'ice_candidate',
+          toUserId: 'host', // Will be resolved by server
+          fromUserId: userId,
+          candidate: ev.candidate.toJSON()
+        };
+        wsRef.current.send(JSON.stringify(msg));
+      }
+    };
+
+    pc.onconnectionstatechange = () => {
+      console.log('🧭 Guest pc state:', pc.connectionState);
+    };
+
+    const offer = await pc.createOffer({
+      offerToReceiveAudio: true,
+      offerToReceiveVideo: true
+    });
+    await pc.setLocalDescription(offer);
+    console.log('Guest: 📤 SENDING webrtc_offer to Host', {
+      sdpLen: offer.sdp?.length
+    });
+    
+    // Find host userId from room (server will handle routing)
+    wsRef.current?.send(
+      JSON.stringify({
+        type: 'webrtc_offer',
+        toUserId: 'host', // Special identifier - server will find actual host
+        fromUserId: userId,
+        sdp: offer
+      })
+    );
+  }
+
   function joinAsViewer() {
     if (!wsRef.current || !wsConnected) return;
     const join = { type: 'join_stream', streamId, userId };
@@ -341,7 +505,7 @@ export default function TestHarness() {
                 WebRTC Test Harness
               </h1>
               <p className="text-muted-foreground" data-testid="text-subtitle">
-                Validate signaling and media flow between Host and Viewer
+                Validate signaling and media flow between Host, Guest, and Viewer
               </p>
             </div>
           </div>
@@ -368,6 +532,14 @@ export default function TestHarness() {
                   data-testid="button-role-host"
                 >
                   Host
+                </Button>
+                <Button
+                  variant={role === 'guest' ? 'default' : 'outline'}
+                  onClick={() => setRole('guest')}
+                  className="flex-1"
+                  data-testid="button-role-guest"
+                >
+                  Guest
                 </Button>
                 <Button
                   variant={role === 'viewer' ? 'default' : 'outline'}

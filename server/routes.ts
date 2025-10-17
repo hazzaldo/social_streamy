@@ -8,7 +8,7 @@ interface Participant {
   ws: WebSocket;
   userId: string;
   streamId: string;
-  role: 'host' | 'viewer';
+  role: 'host' | 'viewer' | 'guest';
 }
 
 const rooms = new Map<string, Map<string, Participant>>();
@@ -145,8 +145,21 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
           console.log('📤 Relaying webrtc_offer', { from: fromUserId, to: toUserId, sdpLen: sdp.sdp?.length });
 
+          // Special handling: if toUserId is 'host', find the actual host in the room
+          let actualToUserId = toUserId;
+          if (toUserId === 'host' && currentParticipant) {
+            const room = rooms.get(currentParticipant.streamId);
+            if (room) {
+              const host = Array.from(room.values()).find(p => p.role === 'host');
+              if (host) {
+                actualToUserId = host.userId;
+                console.log('✅ Resolved "host" to actual userId:', actualToUserId);
+              }
+            }
+          }
+
           // Find recipient and relay
-          relayToUser(toUserId, {
+          relayToUser(actualToUserId, {
             type: 'webrtc_offer',
             fromUserId: String(fromUserId),
             sdp
@@ -178,10 +191,94 @@ export async function registerRoutes(app: Express): Promise<Server> {
             return;
           }
 
-          relayToUser(toUserId, {
+          // Special handling: if toUserId is 'host', find the actual host in the room
+          let actualToUserId = toUserId;
+          if (toUserId === 'host' && currentParticipant) {
+            const room = rooms.get(currentParticipant.streamId);
+            if (room) {
+              const host = Array.from(room.values()).find(p => p.role === 'host');
+              if (host) {
+                actualToUserId = host.userId;
+                console.log('✅ Resolved ICE "host" to actual userId:', actualToUserId);
+              }
+            }
+          }
+
+          relayToUser(actualToUserId, {
             type: 'ice_candidate',
             fromUserId: String(fromUserId),
             candidate
+          });
+          break;
+        }
+
+        case 'cohost_request': {
+          // Viewer requests to become Guest (co-host)
+          const { streamId, fromUserId } = msg;
+          if (!streamId || !fromUserId) {
+            console.error('❌ cohost_request missing required fields');
+            return;
+          }
+
+          const room = rooms.get(streamId);
+          if (!room) {
+            console.error('❌ Room not found:', streamId);
+            return;
+          }
+
+          // Find host and relay request
+          const host = Array.from(room.values()).find(p => p.role === 'host');
+          if (host && host.ws.readyState === WebSocket.OPEN) {
+            host.ws.send(JSON.stringify({
+              type: 'cohost_request',
+              fromUserId: String(fromUserId),
+              streamId
+            }));
+            console.log('✅ Relayed cohost_request to host from:', fromUserId);
+          }
+          break;
+        }
+
+        case 'cohost_accept': {
+          // Host accepts a viewer as Guest
+          const { streamId, guestUserId } = msg;
+          if (!streamId || !guestUserId) {
+            console.error('❌ cohost_accept missing required fields');
+            return;
+          }
+
+          const room = rooms.get(streamId);
+          if (!room) return;
+
+          // Update viewer role to guest
+          const participant = room.get(String(guestUserId));
+          if (participant) {
+            participant.role = 'guest';
+            console.log('✅ Promoted viewer to guest:', guestUserId);
+
+            // Notify the guest
+            if (participant.ws.readyState === WebSocket.OPEN) {
+              participant.ws.send(JSON.stringify({
+                type: 'cohost_accepted',
+                streamId
+              }));
+            }
+          }
+          break;
+        }
+
+        case 'cohost_decline': {
+          // Host declines a viewer's co-host request
+          const { streamId, viewerUserId } = msg;
+          if (!streamId || !viewerUserId) {
+            console.error('❌ cohost_decline missing required fields');
+            return;
+          }
+
+          // Notify the viewer
+          relayToUser(String(viewerUserId), {
+            type: 'cohost_declined',
+            streamId
           });
           break;
         }
