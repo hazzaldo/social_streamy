@@ -28,7 +28,23 @@ The application employs a "video-first" design philosophy, drawing inspiration f
 - **Session Management:** `connect-pg-simple`
 
 **WebRTC Signaling Flow:**
-Participants connect via WebSocket. Host/viewer roles are established, and the server maintains in-memory room state. Signaling messages (offer, answer, ICE candidates) are relayed by `userId`.
+Participants connect via WebSocket. Three roles supported: Host (broadcaster), Guest (co-host with bidirectional media), and Viewer (receive-only). The server maintains in-memory room state and relays signaling messages (offer, answer, ICE candidates) by `userId`. Special 'host' identifier resolves to actual host userId for Guest-to-Host connections.
+
+**Phase 1.1 (Mobile Reliability - Completed):**
+- TURN server configuration with both TCP (`turn:`) and TLS (`turns:`) endpoints for NAT traversal
+- WebSocket heartbeat: client pings every 25s, server responds with pong to maintain mobile network connections
+
+**Phase 2 (Guest Role - Completed):**
+- Guest (co-host) role with bidirectional media exchange between Host and Guest
+- Extended signaling protocol: `cohost_request`, `cohost_accept`, `cohost_decline`, `cohost_offer`, `cohost_answer`
+- Host auto-accepts cohost requests
+- Guest sends offer to 'host' identifier, server resolves to actual host userId
+
+**Phase 3 (Guest Fan-Out - Completed):**
+- Host fans out Guest tracks to all Viewers after receiving Guest media
+- Renegotiation: Host creates updated offers with both Host and Guest tracks for existing viewers
+- Viewers receive and display multiple streams: first stream ID = Host video, second = Guest video
+- UI shows 3 video elements: Local Preview (Host), Host Stream (for Viewers), Guest Stream (for Viewers)
 
 ### Feature Specifications
 - **Core Objects & Roles:** User (viewer/creator), Creator (can go live, receive gifts, accept game requests), Session (live video state), Round (timed game segment), Wallet/Coins (in-app currency).
@@ -47,7 +63,9 @@ Participants connect via WebSocket. Host/viewer roles are established, and the s
 ## External Dependencies
 
 ### Third-Party Services
-- **STUN Server:** Google's public STUN server (`stun:stun.l.google.com:19302`) is used for NAT traversal. TURN server integration is planned.
+- **STUN/TURN Servers:** 
+  - STUN: Google's public STUN server (`stun:stun.l.google.com:19302`) for NAT traversal
+  - TURN: `turn:openrelay.metered.ca:80` (TCP) and `turns:openrelay.metered.ca:443` (TLS) with credentials for mobile network fallback
 
 ### Key NPM Packages
 - **WebRTC:** Native browser WebRTC APIs (no external libraries).
