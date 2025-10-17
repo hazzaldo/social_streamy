@@ -48,6 +48,15 @@ export async function registerRoutes(app: Express): Promise<Server> {
       console.log('📩 WS Message:', msg.type, msg);
 
       switch (msg.type) {
+        case 'ping': {
+          // Heartbeat ping - respond with pong for mobile network reliability
+          ws.send(JSON.stringify({
+            type: 'pong',
+            ts: Date.now()
+          }));
+          break;
+        }
+
         case 'echo': {
           // Echo test for debugging
           ws.send(JSON.stringify({

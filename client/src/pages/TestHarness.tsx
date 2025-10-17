@@ -44,12 +44,26 @@ type ServerMsg =
   | AnswerMsg
   | IceMsg
   | { type: 'participant_count_update'; streamId: string; count: number }
-  | { type: 'connection_echo_test'; [k: string]: any };
+  | { type: 'connection_echo_test'; [k: string]: any }
+  | { type: 'pong'; ts: number };
 
 const ICE_CONFIG: RTCConfiguration = {
   iceServers: [
-    { urls: ['stun:stun.l.google.com:19302'] }
-  ]
+    { urls: ['stun:stun.l.google.com:19302'] },
+    { urls: ['stun:stun1.l.google.com:19302'] },
+    // TURN servers with TCP/TLS fallback for mobile networks and strict NAT
+    {
+      urls: [
+        'turn:openrelay.metered.ca:80',
+        'turn:openrelay.metered.ca:443',
+        'turn:openrelay.metered.ca:443?transport=tcp',
+        'turns:openrelay.metered.ca:443?transport=tcp'
+      ],
+      username: 'openrelayproject',
+      credential: 'openrelayproject'
+    }
+  ],
+  iceCandidatePoolSize: 10
 };
 
 export default function TestHarness() {
@@ -68,6 +82,7 @@ export default function TestHarness() {
   const localStreamRef = useRef<MediaStream | null>(null);
   const hostPcByViewer = useRef<Map<string, RTCPeerConnection>>(new Map());
   const viewerPcRef = useRef<RTCPeerConnection | null>(null);
+  const heartbeatIntervalRef = useRef<NodeJS.Timeout | null>(null);
 
   const isHost = role === 'host';
 
@@ -117,6 +132,16 @@ export default function TestHarness() {
       const join = { type: 'join_stream', streamId, userId };
       console.log(`${isHost ? 'Host' : 'Viewer'}: 📤 join_stream`, join);
       ws.send(JSON.stringify(join));
+
+      // Start heartbeat ping every 25 seconds for mobile network reliability
+      if (heartbeatIntervalRef.current) {
+        clearInterval(heartbeatIntervalRef.current);
+      }
+      heartbeatIntervalRef.current = setInterval(() => {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: 'ping', ts: Date.now() }));
+        }
+      }, 25000);
     };
 
     ws.onmessage = async evt => {
@@ -132,6 +157,9 @@ export default function TestHarness() {
       switch (data.type) {
         case 'connection_echo_test':
           console.log('🔁 echo ok');
+          break;
+        case 'pong':
+          // Heartbeat response received
           break;
         case 'joined_stream': {
           if (!isHost) return;
@@ -189,6 +217,11 @@ export default function TestHarness() {
     ws.onclose = () => {
       setWsConnected(false);
       console.log('❌ WS CLOSED');
+      // Clear heartbeat on close
+      if (heartbeatIntervalRef.current) {
+        clearInterval(heartbeatIntervalRef.current);
+        heartbeatIntervalRef.current = null;
+      }
     };
     ws.onerror = e => console.error('WS ERROR', e);
   }

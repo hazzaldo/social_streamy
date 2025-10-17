@@ -1,113 +1,62 @@
 # Social Streamy
 
 ## Overview
-
-Social Streamy is a WebRTC-based live streaming platform that enables real-time video broadcasting from hosts to viewers. The application uses peer-to-peer WebRTC connections for video transmission with WebSocket signaling for connection negotiation. Built with a React frontend and Express backend, it features a dark-first UI optimized for prolonged viewing sessions.
+Social Streamy is a WebRTC-based live streaming platform facilitating real-time video broadcasting from hosts to viewers. It uses peer-to-peer WebRTC connections for video and WebSocket for signaling. The platform features a dark-first UI, inspired by modern streaming services, designed for prolonged viewing. The business vision is to create a social, interactive entertainment platform centered around short 1-to-1 live game sessions and optional public co-streams, with monetization based on content support (coins for gifts, super messages, and tips).
 
 ## User Preferences
-
 Preferred communication style: Simple, everyday language.
 
 ## System Architecture
 
-### Frontend Architecture
+### UI/UX Decisions
+The application employs a "video-first" design philosophy, drawing inspiration from platforms like Twitch and YouTube Live. Key elements include a dark-first color scheme (deep charcoal with vibrant purple accents), minimal cognitive load, Inter font for UI, and JetBrains Mono for technical data, all within a responsive layout that prioritizes video content.
 
-**Technology Stack:**
+### Technical Implementations
+**Frontend:**
 - **Framework:** React 18 with TypeScript
-- **Routing:** Wouter (lightweight alternative to React Router)
-- **UI Components:** Radix UI primitives with shadcn/ui design system
+- **Routing:** Wouter
+- **UI Components:** Radix UI primitives with shadcn/ui
 - **Styling:** Tailwind CSS with custom design tokens
-- **State Management:** TanStack Query (React Query) for server state
-- **Build Tool:** Vite with custom plugins for Replit integration
+- **State Management:** TanStack Query for server state
+- **Build Tool:** Vite
 
-**Design System:**
-The application follows a "video-first" design philosophy inspired by modern streaming platforms (Twitch, YouTube Live, Discord). Key design principles include:
-- Dark-first color scheme (deep charcoal backgrounds with vibrant purple accents)
-- Minimal cognitive load with single-purpose controls
-- Typography using Inter for UI and JetBrains Mono for technical data
-- Responsive layout system prioritizing video content
-
-**Component Architecture:**
-- Page-based routing structure (`/` for home, `/harness` for WebRTC test interface)
-- Reusable UI components from shadcn/ui with customized variants
-- WebRTC logic encapsulated in TestHarness component with role-based rendering (host/viewer)
-
-### Backend Architecture
-
-**Technology Stack:**
+**Backend:**
 - **Runtime:** Node.js with TypeScript
 - **Framework:** Express.js
-- **WebSocket:** ws library for real-time signaling
-- **Database ORM:** Drizzle ORM configured for PostgreSQL
-- **Session Management:** connect-pg-simple (PostgreSQL session store)
-
-**Server Structure:**
-- **Route Registration:** Centralized in `server/routes.ts`
-- **WebSocket Signaling:** Dedicated `/ws` endpoint for WebRTC negotiation
-- **Health Endpoints:** `/health` and `/_version` for monitoring
-- **Development Mode:** Vite middleware integration for HMR
+- **WebSocket:** `ws` library for real-time signaling
+- **Database ORM:** Drizzle ORM for PostgreSQL
+- **Session Management:** `connect-pg-simple`
 
 **WebRTC Signaling Flow:**
-1. Participants connect to WebSocket endpoint
-2. Host/viewer roles established via `join_as_host`/`join_as_viewer` messages
-3. Server maintains in-memory room state mapping streamId → participants
-4. Signaling messages (`webrtc_offer`, `webrtc_answer`, `ice_candidate`) relayed by userId
-5. Participant count updates broadcast to all room members
+Participants connect via WebSocket. Host/viewer roles are established, and the server maintains in-memory room state. Signaling messages (offer, answer, ICE candidates) are relayed by `userId`.
 
-**Key Architectural Decisions:**
-- **In-Memory State:** Rooms and participants stored in Map structures for low latency; trade-off is no persistence across server restarts
-- **Direct Message Relay:** Server acts as simple relay for WebRTC signaling without session management complexity
-- **Separate Health Endpoints:** `/health` for load balancers, `/_version` for deployment verification
+### Feature Specifications
+- **Core Objects & Roles:** User (viewer/creator), Creator (can go live, receive gifts, accept game requests), Session (live video state), Round (timed game segment), Wallet/Coins (in-app currency).
+- **Modes:** OFFLINE, SOLO_PRIVATE, SOLO_PUBLIC, MATCH_PENDING, CO_STREAM_PUBLIC, CO_STREAM_PRIVATE, ROUND_ACTIVE, ROUND_COMPLETE.
+- **Monetization:** In-app coins for gifts, super messages, and game requests. Creators earn from these, with a platform commission.
+- **Live Streaming:** Solo (public/private) and Co-Stream capabilities.
+- **Game Mechanics:** Shared engine for all games with pre-game, active round, and round complete phases. Games include "If This Is the Answer…", "Role Roulette", "What Would You Do If…", "2 sentences at a Time Story", "Complete the Headline", "Caption That Pic!", "Mystery Object", "Two Truths and a Lie", "This or That?", "Dream Job Switch", "Dance-Off", "Show Your Talent".
+- **Safety & Moderation:** Community Guidelines, KYC verification for payouts, recording of sessions (public always, private with short retention), report/block tools, profanity filters.
 
-### Data Storage
+### System Design Choices
+- **In-Memory State:** Rooms and participants are stored in `Map` structures for low latency, with the trade-off of no persistence across server restarts.
+- **Direct Message Relay:** The server acts as a simple relay for WebRTC signaling.
+- **Health Endpoints:** Separate `/health` and `/_version` endpoints for monitoring.
+- **Database:** PostgreSQL via Neon serverless driver, managed by Drizzle ORM. User data and session data are persisted, while WebRTC state is ephemeral.
 
-**Database:**
-- **Primary Database:** PostgreSQL via Neon serverless driver
-- **ORM:** Drizzle ORM with type-safe schema definitions
-- **Schema Location:** `shared/schema.ts` for isomorphic access
+## External Dependencies
 
-**Current Schema:**
-```typescript
-users table:
-  - id: UUID primary key (auto-generated)
-  - username: text unique
-  - password: text (hashed)
-```
+### Third-Party Services
+- **STUN Server:** Google's public STUN server (`stun:stun.l.google.com:19302`) is used for NAT traversal. TURN server integration is planned.
 
-**Storage Strategy:**
-- **User Data:** Persisted in PostgreSQL
-- **Session Data:** PostgreSQL-backed sessions via connect-pg-simple
-- **WebRTC State:** Ephemeral in-memory storage (not persisted)
+### Key NPM Packages
+- **WebRTC:** Native browser WebRTC APIs (no external libraries).
+- **WebSocket:** `ws` library for server-side WebSocket handling.
+- **UI Framework:** `@radix-ui/*`, `class-variance-authority`, `tailwindcss`.
+- **Database:** `@neondatabase/serverless`, `drizzle-orm`, `drizzle-kit`.
+- **Development:** `@replit/*` plugins, `vite`.
 
-**Migration Strategy:**
-- Drizzle Kit for schema migrations
-- Migration files in `/migrations` directory
-- Push command: `npm run db:push`
-
-### External Dependencies
-
-**Third-Party Services:**
-- **STUN Server:** Google's public STUN server (`stun:stun.l.google.com:19302`) for NAT traversal
-- **TURN Server:** Planned but not implemented (TODO comment indicates future TCP/TLS TURN server)
-
-**Key NPM Packages:**
-- **WebRTC:** Native browser WebRTC APIs (no external libraries)
-- **WebSocket:** `ws` library for server-side WebSocket handling
-- **UI Framework:** 
-  - `@radix-ui/*` primitives (20+ component packages)
-  - `class-variance-authority` for component variants
-  - `tailwindcss` for styling
-- **Database:**
-  - `@neondatabase/serverless` for PostgreSQL connection
-  - `drizzle-orm` and `drizzle-kit` for ORM and migrations
-- **Development:**
-  - `@replit/*` plugins for Replit-specific features
-  - `vite` with React plugin for build/dev
-
-**API Integration Points:**
-- WebSocket signaling endpoint: `wss://[host]/ws` (protocol-aware URL construction)
-- REST endpoints for health checks and potential future user management
-- No external API integrations currently implemented
-
-**Authentication:**
-Schema includes user/password table but authentication flow not yet implemented in routes.
+### API Integration Points
+- **WebSocket Signaling:** `wss://[host]/ws` endpoint.
+- **REST Endpoints:** For health checks and potential future user management.
+- **Authentication:** Schema for user/password exists, but the full authentication flow is not yet implemented.
