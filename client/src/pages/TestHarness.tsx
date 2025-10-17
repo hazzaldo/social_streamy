@@ -80,13 +80,17 @@ export default function TestHarness() {
 
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
+  const guestVideoRef = useRef<HTMLVideoElement | null>(null);
 
   const wsRef = useRef<WebSocket | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
+  const guestStreamRef = useRef<MediaStream | null>(null);
   const hostPcByViewer = useRef<Map<string, RTCPeerConnection>>(new Map());
   const viewerPcRef = useRef<RTCPeerConnection | null>(null);
   const guestPcRef = useRef<RTCPeerConnection | null>(null);
   const heartbeatIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const viewerHostStreamIdRef = useRef<string | null>(null);
+  const viewerGuestStreamIdRef = useRef<string | null>(null);
 
   const isHost = role === 'host';
   const isGuest = role === 'guest';
@@ -288,7 +292,16 @@ export default function TestHarness() {
     const pc = new RTCPeerConnection(ICE_CONFIG);
     hostPcByViewer.current.set(viewerId, pc);
 
+    // Add Host tracks
     local.getTracks().forEach(t => pc.addTrack(t, local));
+
+    // Phase 3: Add Guest tracks if available
+    if (guestStreamRef.current) {
+      guestStreamRef.current.getTracks().forEach(t => {
+        pc.addTrack(t, guestStreamRef.current!);
+        console.log(`📤 Host: Adding Guest ${t.kind} track to viewer ${viewerId}`);
+      });
+    }
 
     pc.onicecandidate = ev => {
       if (ev.candidate && wsRef.current) {
@@ -337,11 +350,40 @@ export default function TestHarness() {
       pc = new RTCPeerConnection(ICE_CONFIG);
       viewerPcRef.current = pc;
       pc.ontrack = ev => {
-        if (remoteVideoRef.current) {
-          remoteVideoRef.current.srcObject = ev.streams[0];
-          remoteVideoRef.current.play().catch(() => {});
+        // Phase 3: Viewers receive multiple streams (Host + Guest)
+        if (ev.streams.length === 0) {
+          console.warn('📺 Viewer received track without stream');
+          return;
         }
-        console.log('📺 Viewer attached remote stream');
+
+        const stream = ev.streams[0];
+        const streamId = stream.id;
+        console.log('📺 Viewer received track:', ev.track.kind, 'from stream:', streamId);
+        
+        // Track which stream is Host vs Guest by order received
+        if (!viewerHostStreamIdRef.current) {
+          // First stream = Host
+          viewerHostStreamIdRef.current = streamId;
+          if (remoteVideoRef.current) {
+            remoteVideoRef.current.srcObject = stream;
+            remoteVideoRef.current.play().catch(() => {});
+            console.log('📺 Viewer attached Host stream to remoteVideo');
+          }
+        } else if (viewerHostStreamIdRef.current === streamId) {
+          // Additional track from Host stream
+          console.log('📺 Viewer received additional Host track');
+        } else if (!viewerGuestStreamIdRef.current) {
+          // Second stream = Guest
+          viewerGuestStreamIdRef.current = streamId;
+          if (guestVideoRef.current) {
+            guestVideoRef.current.srcObject = stream;
+            guestVideoRef.current.play().catch(() => {});
+            console.log('📺 Viewer attached Guest stream to guestVideo');
+          }
+        } else if (viewerGuestStreamIdRef.current === streamId) {
+          // Additional track from Guest stream
+          console.log('📺 Viewer received additional Guest track');
+        }
       };
       pc.onicecandidate = ev => {
         if (ev.candidate && wsRef.current) {
@@ -387,8 +429,10 @@ export default function TestHarness() {
       // Host receives tracks from Guest
       pc.ontrack = ev => {
         console.log('📺 Host received track from Guest:', ev.streams[0]);
-        // For Phase 3, we'll fan-out Guest tracks to Viewers
-        // For now, just log
+        // Store Guest stream for fan-out to Viewers (Phase 3)
+        guestStreamRef.current = ev.streams[0];
+        // Add Guest tracks to all existing viewer connections
+        fanOutGuestTracksToViewers();
       };
 
       pc.onicecandidate = ev => {
@@ -484,6 +528,44 @@ export default function TestHarness() {
     const join = { type: 'join_stream', streamId, userId };
     console.log('📤 join_stream', join);
     wsRef.current.send(JSON.stringify(join));
+  }
+
+  async function fanOutGuestTracksToViewers() {
+    if (!guestStreamRef.current) return;
+    
+    console.log('📡 Fan-out: Adding Guest tracks to all viewers and renegotiating');
+    
+    // Add Guest tracks to all existing viewer peer connections and renegotiate
+    for (const [viewerId, pc] of hostPcByViewer.current.entries()) {
+      // Check if this PC already has Guest tracks (to avoid duplicates)
+      const senders = pc.getSenders();
+      const guestTracks = guestStreamRef.current.getTracks();
+      
+      let tracksAdded = false;
+      guestTracks.forEach(track => {
+        const existingSender = senders.find(s => s.track?.id === track.id);
+        if (!existingSender) {
+          pc.addTrack(track, guestStreamRef.current!);
+          console.log(`📤 Fan-out: Added Guest ${track.kind} track to viewer ${viewerId}`);
+          tracksAdded = true;
+        }
+      });
+
+      // Renegotiate if we added new tracks
+      if (tracksAdded) {
+        const offer = await pc.createOffer();
+        await pc.setLocalDescription(offer);
+        console.log(`📤 Fan-out: Sending updated offer to viewer ${viewerId}`);
+        wsRef.current?.send(
+          JSON.stringify({
+            type: 'webrtc_offer',
+            toUserId: viewerId,
+            fromUserId: userId,
+            sdp: offer
+          })
+        );
+      }
+    }
   }
 
   function disconnectWS() {
@@ -641,7 +723,7 @@ export default function TestHarness() {
         </Card>
 
         {/* Video Grid */}
-        <div className="grid gap-6 md:grid-cols-2">
+        <div className="grid gap-6 md:grid-cols-3">
           {/* Local Video (Host Preview) */}
           <Card className="overflow-hidden">
             <CardHeader className="pb-4">
@@ -672,7 +754,7 @@ export default function TestHarness() {
           {/* Remote Video (Viewer Sees Host) */}
           <Card className="overflow-hidden">
             <CardHeader className="pb-4">
-              <CardTitle className="text-base">Remote Stream (Viewer Sees Host)</CardTitle>
+              <CardTitle className="text-base">Host Stream</CardTitle>
             </CardHeader>
             <CardContent className="p-0">
               <div className="relative aspect-video bg-black">
@@ -686,7 +768,31 @@ export default function TestHarness() {
                 <div className="absolute inset-0 flex items-center justify-center text-muted-foreground pointer-events-none">
                   <div className="text-center">
                     <RadioIcon className="mx-auto h-12 w-12 opacity-50" />
-                    <p className="mt-2 text-sm">Waiting for remote stream</p>
+                    <p className="mt-2 text-sm">Waiting for Host stream</p>
+                  </div>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+
+          {/* Guest Video (Viewer Sees Guest - Phase 3) */}
+          <Card className="overflow-hidden">
+            <CardHeader className="pb-4">
+              <CardTitle className="text-base">Guest Stream</CardTitle>
+            </CardHeader>
+            <CardContent className="p-0">
+              <div className="relative aspect-video bg-black">
+                <video
+                  ref={guestVideoRef}
+                  className="h-full w-full object-cover"
+                  autoPlay
+                  playsInline
+                  data-testid="video-guest"
+                />
+                <div className="absolute inset-0 flex items-center justify-center text-muted-foreground pointer-events-none">
+                  <div className="text-center">
+                    <UserIcon className="mx-auto h-12 w-12 opacity-50" />
+                    <p className="mt-2 text-sm">Waiting for Guest stream</p>
                   </div>
                 </div>
               </div>
