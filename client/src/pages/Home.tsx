@@ -23,11 +23,23 @@ export default function Home() {
               WebRTC-based live streaming platform with real-time host → viewer broadcast,
               WebSocket signaling, and peer-to-peer video communication
             </p>
-            <div className="mt-10 flex items-center justify-center gap-4">
+            <div className="mt-10 flex flex-wrap items-center justify-center gap-4">
+              <Link href="/host/demo">
+                <Button size="lg" variant="default" data-testid="button-start-host">
+                  <VideoIcon className="mr-2 h-5 w-5" />
+                  Start Hosting
+                </Button>
+              </Link>
+              <Link href="/viewer/demo">
+                <Button size="lg" variant="outline" data-testid="button-join-viewer">
+                  <RadioIcon className="mr-2 h-5 w-5" />
+                  Join as Viewer
+                </Button>
+              </Link>
               <Link href="/harness">
-                <Button size="lg" data-testid="button-open-harness">
+                <Button size="lg" variant="secondary" data-testid="button-open-harness">
                   <TestTube2Icon className="mr-2 h-5 w-5" />
-                  Open Test Harness
+                  Test Harness
                 </Button>
               </Link>
             </div>

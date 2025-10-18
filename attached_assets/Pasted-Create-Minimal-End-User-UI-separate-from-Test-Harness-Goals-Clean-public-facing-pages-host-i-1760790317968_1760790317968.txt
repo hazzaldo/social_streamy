@@ -1,0 +1,87 @@
+Create Minimal End-User UI (separate from Test Harness)
+
+Goals
+
+Clean, public-facing pages: /host/:id, /viewer/:id.
+
+Reuse your existing signaling/WebRTC/Game Rails under the hood.
+
+Keep the Harness available only in dev or behind a flag.
+
+Routes & Guards
+
+Add routes /host/:id, /viewer/:id.
+
+Hide /harness unless ALLOW_HARNESS=true (env flag). In prod builds, default to false.
+
+Host page (/host/:id)
+
+UI: camera preview, Go Live (connect WS + start local tracks + offers to viewers), Copy Invite Link (deep link to /viewer/:id).
+
+Co-host controls: View Requests (queue list) + Approve/Decline; active guest panel with Mute/Unmute, Cam Off/On, End Co-host.
+
+Game panel (compact): select game (caption_comp, dont_laugh, image_assoc), Start / Next Round / End, show round status and timer.
+
+Reliability under the hood: keep ICE restart + WS auto-reconnect; no debug logs visible.
+
+Viewer page (/viewer/:id)
+
+UI: stream player; Request Co-host button with states (Idle → Pending → Accepted/Declined).
+
+Game input area (contextual): caption text field or action button depending on game phase.
+
+On approve → auto-upgrade to Guest (bidirectional) without reload.
+
+Styling & UX
+
+Minimal, mobile-first layout (one column on phone).
+
+“Tap to play/unmute” overlay for iOS autoplay guard.
+
+Toasts for: co-host approved/declined/ended; network recovering; game phase changes.
+
+DoD
+
+Host opens /host/demo; clicks Go Live → can copy Viewer link.
+
+Viewer opens /viewer/demo; sees video in <3s.
+
+Viewer requests co-host → Host approves → Guest video appears to Host and all Viewers.
+
+Host starts “Caption Competition”; Guest submits; state version increments and is visible to everyone.
+
+Hard refresh on any role → app auto-rejoins and restores game state.
+
+/harness is blocked in production unless ALLOW_HARNESS=true.
+
+Tech Notes
+
+Reuse existing WS messages (join_stream, cohost_, game_).
+
+Use current TURN/ICE/reconnect logic; no new protocols required.
+
+Keep a tiny state store per page (role, streamId, gameState).
+
+Add a copy() helper for invite URL.
+
+Respect existing heartbeat and telemetry silently (no panels).
+
+After that (quick backlog you can queue next)
+
+ICE candidate pruning (stop gather after selected pair locks + log final pair).
+
+Host “Reconnect all viewers” button → renegotiates offers to each viewer on demand.
+
+Per-track mini stats overlay (fps/kbps/loss badges on tiles) — dev-only flag.
+
+Session resume token (store role/streamId/userId in sessionStorage to smooth reconnects).
+
+Quick test checklist (manual)
+
+Host & Viewer pages work on iPhone + desktop.
+
+Co-host request/approval flow works; Guest fan-out visible to new viewers.
+
+Game round runs end-to-end; reconnect mid-round resumes correctly.
+
+Harness blocked in prod, accessible in dev with flag.
