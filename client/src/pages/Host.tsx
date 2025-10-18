@@ -5,7 +5,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Badge } from '@/components/ui/badge';
 import { useToast } from '@/hooks/use-toast';
 import { Copy, Video, VideoOff, Mic, MicOff, X } from 'lucide-react';
-import { getPlatformConstraints, initializeQualitySettings, reapplyQualitySettings, requestKeyFrame, setupOptimizedCandidateHandler, addVideoTrackWithSimulcast, type AdaptiveQualityManager } from '@/lib/webrtc-quality';
+import { getPlatformConstraints, initializeQualitySettings, reapplyQualitySettings, requestKeyFrame, setupOptimizedCandidateHandler, addVideoTrackWithSimulcast, enableOpusFecDtx, type AdaptiveQualityManager } from '@/lib/webrtc-quality';
 
 function wsUrl(path = '/ws') {
   const { protocol, host } = window.location;
@@ -245,6 +245,10 @@ export default function Host() {
     candidateHandlerCleanups.current.set(viewerUserId, cleanupCandidateHandler);
     
     const offer = await pc.createOffer();
+    // Enable OPUS FEC/DTX for audio resilience
+    if (offer.sdp) {
+      offer.sdp = enableOpusFecDtx(offer.sdp);
+    }
     await pc.setLocalDescription(offer);
     
     wsRef.current?.send(JSON.stringify({
@@ -312,6 +316,10 @@ export default function Host() {
     
     await pc.setRemoteDescription(new RTCSessionDescription(sdp));
     const answer = await pc.createAnswer();
+    // Enable OPUS FEC/DTX for audio resilience
+    if (answer.sdp) {
+      answer.sdp = enableOpusFecDtx(answer.sdp);
+    }
     await pc.setLocalDescription(answer);
     
     wsRef.current?.send(JSON.stringify({
@@ -360,6 +368,10 @@ export default function Host() {
         }
         
         const offer = await pc.createOffer();
+        // Enable OPUS FEC/DTX for audio resilience
+        if (offer.sdp) {
+          offer.sdp = enableOpusFecDtx(offer.sdp);
+        }
         await pc.setLocalDescription(offer);
         
         wsRef.current?.send(JSON.stringify({

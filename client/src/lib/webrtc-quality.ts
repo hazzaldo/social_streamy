@@ -397,6 +397,67 @@ export async function applyBitrateProfile(
 }
 
 /**
+ * Enable OPUS FEC and DTX in SDP for audio resilience
+ * FEC (Forward Error Correction): Allows receiver to reconstruct lost packets
+ * DTX (Discontinuous Transmission): Reduces bandwidth during silence
+ * 
+ * Call this on SDP before setLocalDescription/setRemoteDescription
+ */
+export function enableOpusFecDtx(sdp: string): string {
+  const lines = sdp.split('\r\n');
+  let opusPayloadType: string | null = null;
+  
+  // Find OPUS payload type
+  for (const line of lines) {
+    if (line.includes('opus/48000')) {
+      const match = line.match(/rtpmap:(\d+)\s+opus/i);
+      if (match) {
+        opusPayloadType = match[1];
+        break;
+      }
+    }
+  }
+  
+  if (!opusPayloadType) {
+    console.warn('⚠️  OPUS codec not found in SDP');
+    return sdp;
+  }
+  
+  // Find or create fmtp line for OPUS
+  let fmtpLineIndex = -1;
+  for (let i = 0; i < lines.length; i++) {
+    if (lines[i].startsWith(`a=fmtp:${opusPayloadType}`)) {
+      fmtpLineIndex = i;
+      break;
+    }
+  }
+  
+  if (fmtpLineIndex >= 0) {
+    // Update existing fmtp line
+    let fmtp = lines[fmtpLineIndex];
+    if (!fmtp.includes('useinbandfec=')) {
+      fmtp += ';useinbandfec=1';
+    }
+    if (!fmtp.includes('usedtx=')) {
+      fmtp += ';usedtx=1';
+    }
+    lines[fmtpLineIndex] = fmtp;
+  } else {
+    // Create new fmtp line (insert after rtpmap)
+    for (let i = 0; i < lines.length; i++) {
+      if (lines[i].includes(`rtpmap:${opusPayloadType}`)) {
+        lines.splice(i + 1, 0, `a=fmtp:${opusPayloadType} useinbandfec=1;usedtx=1`);
+        break;
+      }
+    }
+  }
+  
+  const result = lines.join('\r\n');
+  console.log('✅ OPUS FEC/DTX enabled (useinbandfec=1, usedtx=1)');
+  return result;
+}
+
+/**
  * Apply audio OPUS quality settings
  * Audio-first strategy: prioritize audio on degraded connections
  */

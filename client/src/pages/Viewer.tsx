@@ -6,7 +6,7 @@ import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { useToast } from '@/hooks/use-toast';
 import { Volume2, VolumeX } from 'lucide-react';
-import { getPlatformConstraints, initializeQualitySettings, requestKeyFrame } from '@/lib/webrtc-quality';
+import { getPlatformConstraints, initializeQualitySettings, requestKeyFrame, enableOpusFecDtx } from '@/lib/webrtc-quality';
 
 function wsUrl(path = '/ws') {
   const { protocol, host } = window.location;
@@ -307,6 +307,10 @@ export default function Viewer() {
     
     await pc.setRemoteDescription(new RTCSessionDescription(sdp));
     const answer = await pc.createAnswer();
+    // Enable OPUS FEC/DTX for audio resilience
+    if (answer.sdp) {
+      answer.sdp = enableOpusFecDtx(answer.sdp);
+    }
     await pc.setLocalDescription(answer);
     
     wsRef.current?.send(JSON.stringify({
@@ -364,6 +368,10 @@ export default function Viewer() {
       };
       
       const offer = await pc.createOffer();
+      // Enable OPUS FEC/DTX for audio resilience
+      if (offer.sdp) {
+        offer.sdp = enableOpusFecDtx(offer.sdp);
+      }
       await pc.setLocalDescription(offer);
       
       wsRef.current?.send(JSON.stringify({
