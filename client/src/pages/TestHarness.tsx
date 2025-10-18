@@ -109,6 +109,9 @@ export default function TestHarness() {
   const [connectionStats, setConnectionStats] = useState<Map<string, ConnectionStats>>(new Map());
   const statsIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const previousBytesRef = useRef<Map<string, { sent: number; received: number; timestamp: number }>>(new Map());
+  
+  // Reliability & Telemetry: Autoplay tracking
+  const [autoplayBlocked, setAutoplayBlocked] = useState(false);
 
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
@@ -1149,6 +1152,83 @@ export default function TestHarness() {
     return () => stopStatsCollection();
   }, [wsConnected]);
 
+  // Reliability & Telemetry: Page visibility handling
+  useEffect(() => {
+    function handleVisibilityChange() {
+      if (document.hidden) {
+        console.log('📱 Page hidden, suspending stats collection');
+        stopStatsCollection();
+      } else {
+        console.log('📱 Page visible, resuming stats collection');
+        if (wsConnected) {
+          startStatsCollection();
+        }
+        
+        // Resume video playback if paused
+        if (localVideoRef.current?.paused) {
+          localVideoRef.current.play().catch(err => 
+            console.warn('Could not resume local video:', err)
+          );
+        }
+        if (remoteVideoRef.current?.paused) {
+          remoteVideoRef.current.play().catch(err => 
+            console.warn('Could not resume remote video:', err)
+          );
+        }
+        if (guestVideoRef.current?.paused) {
+          guestVideoRef.current.play().catch(err => 
+            console.warn('Could not resume guest video:', err)
+          );
+        }
+      }
+    }
+
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => document.removeEventListener('visibilitychange', handleVisibilityChange);
+  }, [wsConnected]);
+
+  // Reliability & Telemetry: Autoplay guards for remote and guest videos
+  useEffect(() => {
+    const handleAutoplay = async (videoRef: React.RefObject<HTMLVideoElement>, name: string) => {
+      if (!videoRef.current) return;
+      
+      try {
+        await videoRef.current.play();
+        setAutoplayBlocked(false);
+      } catch (err: any) {
+        if (err.name === 'NotAllowedError' || err.name === 'NotSupportedError') {
+          console.warn(`⚠️ Autoplay blocked for ${name} video. User interaction required.`);
+          setAutoplayBlocked(true);
+        }
+      }
+    };
+
+    // Monitor for new tracks and attempt autoplay
+    const interval = setInterval(() => {
+      if (remoteVideoRef.current?.srcObject && remoteVideoRef.current.paused) {
+        handleAutoplay(remoteVideoRef, 'remote');
+      }
+      if (guestVideoRef.current?.srcObject && guestVideoRef.current.paused) {
+        handleAutoplay(guestVideoRef, 'guest');
+      }
+    }, 1000);
+
+    return () => clearInterval(interval);
+  }, []);
+
+  // Manual play function for user interaction
+  function resumeAllVideos() {
+    const videos = [localVideoRef, remoteVideoRef, guestVideoRef];
+    videos.forEach((ref, idx) => {
+      if (ref.current?.paused) {
+        ref.current.play().catch(err => 
+          console.warn(`Could not resume video ${idx}:`, err)
+        );
+      }
+    });
+    setAutoplayBlocked(false);
+  }
+
   // Phase 4: Viewer requests to become cohost
   function requestCohost() {
     if (!wsRef.current || !wsConnected || cohostRequestState !== 'idle') return;
@@ -1392,6 +1472,26 @@ export default function TestHarness() {
                 </Badge>
               )}
             </div>
+
+            {/* Autoplay Warning */}
+            {autoplayBlocked && (
+              <div className="p-3 border border-yellow-500 rounded-md bg-yellow-500/10">
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 text-sm">
+                    <span className="text-yellow-500">⚠️</span>
+                    <span>Autoplay blocked. Click to resume video playback.</span>
+                  </div>
+                  <Button
+                    onClick={resumeAllVideos}
+                    variant="outline"
+                    size="sm"
+                    data-testid="button-resume-videos"
+                  >
+                    Resume Videos
+                  </Button>
+                </div>
+              </div>
+            )}
 
             {/* Phase 4: Viewer Cohost Request UI */}
             {isViewer && wsConnected && (
