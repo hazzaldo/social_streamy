@@ -5,7 +5,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Badge } from '@/components/ui/badge';
 import { useToast } from '@/hooks/use-toast';
 import { Copy, Video, VideoOff, Mic, MicOff, X } from 'lucide-react';
-import { getPlatformConstraints, initializeQualitySettings, reapplyQualitySettings, requestKeyFrame, setupOptimizedCandidateHandler, addVideoTrackWithSimulcast, enableOpusFecDtx, setPlayoutDelayHint, restartICE, type AdaptiveQualityManager } from '@/lib/webrtc-quality';
+import { getPlatformConstraints, initializeQualitySettings, reapplyQualitySettings, requestKeyFrame, setupOptimizedCandidateHandler, addVideoTrackWithSimulcast, enableOpusFecDtx, setPlayoutDelayHint, restartICE, setCodecPreferences, type AdaptiveQualityManager } from '@/lib/webrtc-quality';
 
 function wsUrl(path = '/ws') {
   const { protocol, host } = window.location;
@@ -73,6 +73,7 @@ export default function Host() {
   const qualityManagers = useRef<Map<string, AdaptiveQualityManager>>(new Map());
   const monitoringCleanups = useRef<Map<string, () => void>>(new Map());
   const candidateHandlerCleanups = useRef<Map<string, () => void>>(new Map());
+  const viewerPlatforms = useRef<Map<string, { isIOSSafari: boolean }>>(new Map());
   
   // Renegotiation queue for glare safety
   const renegotiationInProgress = useRef(false);
@@ -139,6 +140,8 @@ export default function Host() {
         if (msg.type === 'participant_count_update') {
           setViewerCount(msg.count - 1); // Exclude host
         } else if (msg.type === 'joined_stream' && msg.userId) {
+          // Store viewer platform info for codec preference
+          viewerPlatforms.current.set(msg.userId, { isIOSSafari: msg.isIOSSafari || false });
           // New viewer joined - create peer connection and send offer
           await createViewerConnection(msg.userId);
         } else if (msg.type === 'webrtc_answer' && msg.fromUserId) {
@@ -388,6 +391,16 @@ export default function Host() {
           pc.addTrack(track, guestStreamRef.current);
         }
       }
+    }
+    
+    // Check if viewer is iOS/Safari and prefer H.264
+    const viewerPlatform = viewerPlatforms.current.get(viewerUserId);
+    const isIOSSafari = viewerPlatform?.isIOSSafari || false;
+    
+    if (isIOSSafari) {
+      // For iOS/Safari viewers, prefer H.264 to ensure compatibility
+      console.log(`📱 iOS/Safari viewer detected (${viewerUserId.substring(0, 8)}), preferring H.264`);
+      setCodecPreferences(pc, 'video', ['video/H264', 'video/VP9', 'video/VP8']);
     }
     
     // Initialize quality settings (codec prefs, bitrate, audio quality) with monitoring

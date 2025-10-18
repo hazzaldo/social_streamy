@@ -93,12 +93,16 @@ export default function Viewer() {
         setWsConnected(true);
         reconnectAttemptsRef.current = 0;
         
+        // Detect iOS/Safari for codec preference
+        const isIOSSafari = /iPhone|iPad|iPod/.test(navigator.userAgent) && /Safari/.test(navigator.userAgent);
+        
         // Join as viewer or guest
         ws.send(JSON.stringify({
           type: 'join_stream',
           streamId,
           role: roleRef.current,
-          userId
+          userId,
+          isIOSSafari
         }));
         
         // Start heartbeat
@@ -569,6 +573,8 @@ export default function Viewer() {
         const [stream] = event.streams;
         if (hostVideoRef.current) {
           hostVideoRef.current.srcObject = stream;
+          // Explicit play() call with autoplay fallback
+          hostVideoRef.current.play().catch(() => setAutoplayBlocked(true));
         }
         
         // Set playout delay hint for low-latency playback (0.2s)

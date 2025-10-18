@@ -34,7 +34,7 @@ function sendMessage(ws: WebSocket, message: any, critical: boolean = true): boo
  * Validates room capacity, assigns role, creates session token
  */
 export const handleJoinStream: MessageHandler = async (ws, msg, context) => {
-  const { streamId, userId } = msg;
+  const { streamId, userId, isIOSSafari } = msg;
   const { rooms, sessionManager, broadcastToRoom, currentParticipant: participantRef, sessionToken: sessionTokenRef, sendAck: ack, sendError: error, metrics } = context;
   
   if (!rooms || !sessionManager) {
@@ -68,7 +68,7 @@ export const handleJoinStream: MessageHandler = async (ws, msg, context) => {
   const role = room.size === 0 ? 'host' : 'viewer';
 
   // Add participant to room and update ref
-  const newParticipant = { ws, userId: String(userId), streamId, role };
+  const newParticipant = { ws, userId: String(userId), streamId, role, isIOSSafari: isIOSSafari || false };
   room.set(String(userId), newParticipant);
   if (participantRef) {
     (participantRef as any).current = newParticipant;
@@ -105,7 +105,8 @@ export const handleJoinStream: MessageHandler = async (ws, msg, context) => {
       sendMessage((host as any).ws, {
         type: 'joined_stream',
         streamId,
-        userId: String(userId)
+        userId: String(userId),
+        isIOSSafari: isIOSSafari || false
       });
     }
   }
