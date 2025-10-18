@@ -102,10 +102,15 @@ export const CODEC_FEATURES = {
 
 /**
  * Get preferred codec list based on platform
+ * TEMPORARY: Force H.264 baseline for all viewers to debug black video issue
  * iOS/Safari: H.264 only (best compatibility)
  * Other: VP9 preferred, H.264 fallback, AV1 if enabled
  */
 export function getPreferredCodecs(): string[] {
+  // TEMPORARY: Force H.264 for everyone until we fix black video issue
+  return ["video/H264"];
+  
+  /* Original logic:
   const isIOS = detectSafariIOS();
   
   if (isIOS) {
@@ -117,6 +122,7 @@ export function getPreferredCodecs(): string[] {
     codecs.unshift("video/AV1");  // Prefer AV1 if enabled
   }
   return codecs;
+  */
 }
 
 /**
@@ -287,6 +293,7 @@ export async function addVideoTrackWithSimulcast(
         console.log("✅ Simulcast enabled with 3 layers (q/m/h)");
       }
       
+      console.log("[HOST] tx mid", transceiver.sender?.mid);
       return transceiver.sender;
     } catch (err) {
       console.warn("⚠️  Simulcast failed, falling back to SVC:", err);
@@ -323,6 +330,7 @@ export async function addVideoTrackWithSimulcast(
     console.log("✅ Single-layer video track (iOS/Safari)");
   }
 
+  console.log("[HOST] tx mid", sender.transceiver?.mid);
   return sender;
 }
 

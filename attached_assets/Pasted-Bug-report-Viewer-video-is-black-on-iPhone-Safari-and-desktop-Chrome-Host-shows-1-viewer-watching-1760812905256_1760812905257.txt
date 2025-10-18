@@ -1,0 +1,66 @@
+Bug report: Viewer video is black on iPhone Safari and desktop Chrome. Host shows “1 viewer watching”. “Request co-host” never surfaces on Host. /health is OK; /metrics shows activity but no codec stats.
+
+Please do the following (in order):
+
+Force a simple, known-good path
+
+Temporarily disable VP9/AV1 for all viewers; offer H.264 baseline (42e01f, packetization-mode=1) to everyone until we fix.
+
+On Host, when creating the camera sender, ensure exactly one video transceiver with direction:"sendonly" and no renegotiation creates new transceivers. Log the transceiver mid: console.log("[HOST] tx mid", sender.transceiver?.mid).
+
+Verify track attach on the viewer
+
+In Viewer.tsx, after pc.ontrack, log:
+console.log("[VIEWER] ontrack", ev.streams?.[0]?.id, ev.track.kind);
+
+Ensure the video element has playsInline autoPlay muted and we call video.play().catch(console.warn).
+
+Add a 5s watchdog: if video.readyState < 2, call receiver.requestKeyFrame?.() once.
+
+Confirm signaling is actually exchanging SDP
+
+In the WS handler, log on both sides when we send/receive:
+
+webrtc_offer, webrtc_answer, and the first ice_candidate.
+
+If Viewer never receives webrtc_answer, the offer/answer path is broken; fix routing.
+
+Fix co-host request routing
+
+Check that request_cohost (or current message name) is NOT being swallowed by the router shim. If it’s legacy-only, ensure the shim falls back to legacy and that the handler increments a metric (e.g., cohost_requests_total).
+
+Add a toast/log on Host when a request arrives so we can see it.
+
+Add quick observability to /healthz
+
+For each room, include:
+
+participants with {id, role, userAgent, isIOSSafari}
+
+lastViewerCodec (parsed from stats)
+
+selectedCandidatePair summary (type + local/remote)
+
+framesDecoded for the most recent viewer
+
+Run an in-browser E2E check
+
+From desktop: open /viewer/demo and confirm the console shows:
+
+[VIEWER] ontrack video
+
+codec = H264 (from stats every 3s)
+
+framesDecoded increases.
+
+If any of the above fails, print the logs in console so I can read them.
+
+Acceptance (DoD):
+
+Viewer on desktop Chrome shows video within 3s.
+
+Viewer on iPhone Safari shows video within 3s.
+
+Co-host request appears on Host.
+
+/healthz includes lastViewerCodec, selectedCandidatePair, and framesDecoded.
