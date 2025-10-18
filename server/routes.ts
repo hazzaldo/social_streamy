@@ -107,8 +107,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.get('/_version', (_req, res) => {
     res.json({
-      ts: new Date().toISOString(),
-      git: process.env.REPL_SLUG || 'local'
+      build: 'WAVE3-H264-MVP',
+      timestamp: new Date().toISOString(),
+      commitHash: process.env.REPL_SLUG || 'local'
     });
   });
 

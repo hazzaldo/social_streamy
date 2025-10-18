@@ -86,6 +86,12 @@ export default function Host() {
   // ICE candidate logging flags (per viewer/guest)
   const haveLoggedFirstIce = useRef<Map<string, boolean>>(new Map());
 
+  // Set build tag for cache-busting verification
+  useEffect(() => {
+    (window as any).__BUILD_TAG__ = 'WAVE3-H264-MVP';
+    console.info('[BUILD]', (window as any).__BUILD_TAG__);
+  }, []);
+
   // WebSocket setup and reconnection
   useEffect(() => {
     if (!isLive) return;
@@ -178,7 +184,7 @@ export default function Host() {
             await pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
           }
         } else if (msg.type === 'cohost_request') {
-          console.log("[HOST] Received cohost_request from", msg.fromUserId);
+          console.log("[HOST] cohost_request received from", msg.fromUserId);
           toast({
             title: 'Co-host Request',
             description: `User ${msg.fromUserId.slice(0, 8)} wants to join`,
@@ -976,6 +982,13 @@ export default function Host() {
 
   return (
     <div className="min-h-screen bg-background p-4">
+      {/* Build Tag Badge */}
+      <div className="fixed top-2 right-2 z-[60]">
+        <Badge variant="default" className="bg-purple-600 hover:bg-purple-700" data-testid="badge-build-tag">
+          HUD ACTIVE – WAVE3-H264-MVP
+        </Badge>
+      </div>
+      
       {/* Reconnecting Banner */}
       {isReconnecting && (
         <div className="fixed top-0 left-0 right-0 bg-yellow-500 text-yellow-950 px-4 py-2 text-center font-medium z-50" data-testid="banner-reconnecting">

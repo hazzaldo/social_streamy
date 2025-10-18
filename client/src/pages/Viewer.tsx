@@ -86,6 +86,12 @@ export default function Viewer() {
     roleRef.current = role;
   }, [role]);
 
+  // Set build tag for cache-busting verification
+  useEffect(() => {
+    (window as any).__BUILD_TAG__ = 'WAVE3-H264-MVP';
+    console.info('[BUILD]', (window as any).__BUILD_TAG__);
+  }, []);
+
   // WebSocket setup
   useEffect(() => {
     if (!isJoined) return;
@@ -744,6 +750,7 @@ export default function Viewer() {
   }
 
   function requestCohost() {
+    console.log("[VIEWER] cohost_request sent");
     setCohostRequestState('pending');
     wsRef.current?.send(JSON.stringify({
       type: 'cohost_request',
@@ -798,6 +805,13 @@ export default function Viewer() {
 
   return (
     <div className="min-h-screen bg-background p-4">
+      {/* Build Tag Badge */}
+      <div className="fixed top-2 right-2 z-[60]">
+        <Badge variant="default" className="bg-purple-600 hover:bg-purple-700" data-testid="badge-build-tag">
+          HUD ACTIVE – WAVE3-H264-MVP
+        </Badge>
+      </div>
+      
       {/* Reconnecting Banner */}
       {isReconnecting && (
         <div className="fixed top-0 left-0 right-0 bg-yellow-500 text-yellow-950 px-4 py-2 text-center font-medium z-50" data-testid="banner-reconnecting">

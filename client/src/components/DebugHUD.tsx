@@ -79,7 +79,7 @@ export function DebugHUD({ pc, onRequestKeyframe, onClose }: DebugHUDProps) {
 
   return (
     <Card className="fixed top-4 right-4 z-50 p-4 bg-black/90 text-white border-purple-500 max-w-sm" data-testid="debug-hud">
-      <div className="flex items-center justify-between mb-3">
+      <div className="flex items-center justify-between mb-2">
         <h3 className="text-sm font-bold text-purple-400">🐛 Debug HUD</h3>
         {onClose && (
           <Button
@@ -92,6 +92,10 @@ export function DebugHUD({ pc, onRequestKeyframe, onClose }: DebugHUDProps) {
             <X className="h-4 w-4" />
           </Button>
         )}
+      </div>
+      
+      <div className="mb-3 text-xs font-bold text-green-400" data-testid="text-hud-active">
+        HUD ACTIVE
       </div>
       
       <div className="space-y-2 font-mono text-xs">

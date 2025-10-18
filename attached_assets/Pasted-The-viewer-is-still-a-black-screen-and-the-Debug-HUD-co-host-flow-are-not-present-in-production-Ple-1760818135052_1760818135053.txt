@@ -1,0 +1,31 @@
+The viewer is still a black screen and the Debug HUD/co-host flow are not present in production. Please verify we’re actually running the latest code and not a cached or pre-fix build.
+
+Actions:
+1) Add an unmistakable build tag and surface it everywhere:
+   - On server start: console.log(`[BUILD] ${new Date().toISOString()} WAVE3-H264-MVP`);
+   - Route GET /_version -> { build:"WAVE3-H264-MVP", timestamp, commitHash }.
+   - In client boot (Viewer.tsx + Host.tsx): set window.__BUILD_TAG__ = "WAVE3-H264-MVP"; console.info("[BUILD]", window.__BUILD_TAG__).
+   - Render a tiny badge at top-right of /viewer and /host showing “HUD ACTIVE – WAVE3-H264-MVP”.
+
+2) Ensure the Debug HUD is ALWAYS rendered on /viewer (no query flag). It must show static text “HUD ACTIVE” even before stats populate.
+
+3) Force H.264 minimal path (again, but visibly assert):
+   - Viewer: create RTCPeerConnection, addTransceiver('video',{direction:'recvonly'}) BEFORE setRemoteDescription.
+   - Host: single sendonly transceiver per viewer; call sender.generateKeyFrame() after sending offer.
+   - Log `[HOST] offer sent`, `[VIEWER] answer sent`, and print negotiated codec from SDP.
+   - If ontrack doesn’t fire in 5s: console.error("NO_ONTRACK").
+   - If framesDecoded==0 after 3s: console.error("NO_FRAMES") and send WS 'request_keyframe'.
+
+4) Cohost flow assertion:
+   - When viewer taps Request Co-host: console.log("[VIEWER] cohost_request sent");
+   - Server: log when relaying to host: "[SERVER] relayed cohost_request -> host".
+   - Host: on receipt, log “[HOST] cohost_request received” AND show a visible approval card with a placeholder if needed.
+
+5) Health routes:
+   - GET /healthz -> { rooms:[{ id, viewersCount, h264Only:true }] } (return at least one room when host is live).
+
+6) Republish production and bust cache:
+   - After publish, hit /_version and confirm build tag is “WAVE3-H264-MVP”.
+   - If Replit CDN caches the SPA bundle, append a cache-buster (e.g., add ?v=<timestamp> to script src or set Cache-Control: no-store on client assets for now).
+
+Goal of this pass: I must see (a) “HUD ACTIVE – WAVE3-H264-MVP” badge on the viewer page in prod, (b) /_version returns the same tag, (c) cohost_request logs end-to-end.

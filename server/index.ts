@@ -53,6 +53,17 @@ app.use((req, res, next) => {
     throw err;
   });
 
+  // Add cache-busting middleware for debugging (prevents CDN/browser cache issues)
+  app.use((req, res, next) => {
+    // Disable caching for HTML, JS, and CSS during debug phase
+    if (req.path.match(/\.(html|js|css|mjs)$/i) || req.path === '/' || req.path.startsWith('/host') || req.path.startsWith('/viewer')) {
+      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+      res.setHeader('Pragma', 'no-cache');
+      res.setHeader('Expires', '0');
+    }
+    next();
+  });
+
   // importantly only setup vite in development and after
   // setting up all the other routes so the catch-all route
   // doesn't interfere with the other routes
@@ -72,6 +83,9 @@ app.use((req, res, next) => {
     host: "0.0.0.0",
     reusePort: true,
   }, () => {
+    const buildTag = 'WAVE3-H264-MVP';
+    const timestamp = new Date().toISOString();
+    console.log(`[BUILD] ${timestamp} ${buildTag}`);
     log(`serving on port ${port}`);
   });
 })();
