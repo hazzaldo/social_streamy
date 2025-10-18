@@ -246,6 +246,15 @@ export async function registerRoutes(app: Express): Promise<Server> {
         }
       };
 
+      // Send normalized error response
+      const sendError = (code: string, message: string) => {
+        sendMessage(ws, {
+          type: 'error',
+          code,
+          message
+        }, true);
+      };
+
       switch (msg.type) {
         case 'ping': {
           // Heartbeat ping - respond with pong for mobile network reliability
@@ -337,8 +346,23 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
         case 'join_stream': {
           const { streamId, userId } = msg;
+          
+          // Validation: Required fields
           if (!streamId || !userId) {
             console.error('❌ join_stream missing streamId or userId');
+            sendError('invalid_request', 'streamId and userId are required');
+            return;
+          }
+
+          // Validation: Format checks
+          if (typeof streamId !== 'string' || typeof userId !== 'string') {
+            sendError('invalid_request', 'streamId and userId must be strings');
+            return;
+          }
+
+          // Validation: Length limits
+          if (streamId.length > 100 || userId.length > 100) {
+            sendError('invalid_request', 'streamId and userId must be <= 100 characters');
             return;
           }
 
@@ -358,6 +382,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
           }
           const roomState = rooms.get(streamId)!;
           const room = roomState.participants;
+
+          // Safety: Room capacity limit (max 100 participants)
+          if (room.size >= 100 && !room.has(String(userId))) {
+            console.warn('⚠️ Room at capacity:', { streamId, size: room.size });
+            sendError('room_full', 'This room has reached maximum capacity (100 participants)');
+            return;
+          }
 
           // Determine role: first participant is host, others are viewers
           const role = room.size === 0 ? 'host' : 'viewer';
