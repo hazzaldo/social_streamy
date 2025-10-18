@@ -89,6 +89,21 @@ type ConnectionStats = {
   timestamp: number;
 };
 
+// Phase 5: Game Rails
+type GameState = {
+  version: number;
+  data: any;
+  gameId: string | null;
+  seed?: number;
+};
+
+type GameEvent = {
+  type: string;
+  payload: any;
+  from: string;
+  timestamp: number;
+};
+
 export default function TestHarness() {
   const [role, setRole] = useState<Role>('host');
   const [streamId, setStreamId] = useState<string>('test-stream');
@@ -112,6 +127,11 @@ export default function TestHarness() {
   
   // Reliability & Telemetry: Autoplay tracking
   const [autoplayBlocked, setAutoplayBlocked] = useState(false);
+
+  // Phase 5: Game Rails state
+  const [gameState, setGameState] = useState<GameState>({ version: 0, data: null, gameId: null });
+  const [gameEvents, setGameEvents] = useState<GameEvent[]>([]);
+  const [selectedGameId, setSelectedGameId] = useState<string>('caption_comp');
 
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
@@ -380,6 +400,59 @@ export default function TestHarness() {
           }
           break;
         }
+
+        // Phase 5: Game Rails handlers
+        case 'game_init': {
+          console.log('🎮 Game initialized:', data);
+          setGameState({
+            version: data.version || 1,
+            gameId: data.gameId,
+            seed: data.seed,
+            data: null
+          });
+          setGameEvents([]);
+          break;
+        }
+        case 'game_state': {
+          const { version, full, patch } = data;
+          console.log('🎮 Game state update:', { version, full });
+          
+          setGameState(prev => {
+            // Ignore stale versions
+            if (version < prev.version) {
+              console.warn('⚠️ Ignoring stale game state, version:', version);
+              return prev;
+            }
+            
+            // Full replace or shallow merge (handle null prev.data)
+            const newData = full ? patch : { ...(prev.data || {}), ...patch };
+            
+            return {
+              ...prev,
+              version,
+              data: newData
+            };
+          });
+          break;
+        }
+        case 'game_event': {
+          // Host receives events from guests/viewers
+          if (roleRef.current !== 'host') return;
+          const event: GameEvent = {
+            type: data.eventType,
+            payload: data.payload,
+            from: data.from,
+            timestamp: Date.now()
+          };
+          console.log('🎮 Game event from', data.from, ':', event);
+          setGameEvents(prev => [...prev, event].slice(-5)); // Keep last 5
+          break;
+        }
+        case 'game_error': {
+          console.error('🎮 Game error:', data.code, data.message);
+          break;
+        }
+
         default:
           break;
       }
@@ -1326,6 +1399,84 @@ export default function TestHarness() {
     }));
   }
 
+  // Phase 5: Game Rails actions
+  function startGame() {
+    if (!wsRef.current || !wsConnected || role !== 'host') return;
+    
+    const initialState = selectedGameId === 'caption_comp' ? {
+      round: 1,
+      prompt: "Caption this photo!",
+      submissions: {},
+      timerMs: 30000,
+      phase: "submit"
+    } : {};
+    
+    // Send game_init
+    wsRef.current.send(JSON.stringify({
+      type: 'game_init',
+      streamId,
+      gameId: selectedGameId,
+      version: 1,
+      seed: Date.now()
+    }));
+    
+    // Send initial game_state
+    setTimeout(() => {
+      wsRef.current?.send(JSON.stringify({
+        type: 'game_state',
+        streamId,
+        version: 1,
+        full: true,
+        patch: initialState
+      }));
+    }, 100);
+  }
+
+  function endGame() {
+    if (!wsRef.current || !wsConnected || role !== 'host') return;
+    
+    wsRef.current.send(JSON.stringify({
+      type: 'game_state',
+      streamId,
+      version: (gameState.version || 0) + 1,
+      full: true,
+      patch: null
+    }));
+    
+    setGameState({ version: 0, data: null, gameId: null });
+    setGameEvents([]);
+  }
+
+  function nextRound() {
+    if (!wsRef.current || !wsConnected || role !== 'host') return;
+    if (!gameState.data) return;
+    
+    const newRound = (gameState.data.round || 1) + 1;
+    wsRef.current.send(JSON.stringify({
+      type: 'game_state',
+      streamId,
+      version: gameState.version + 1,
+      full: false,
+      patch: {
+        round: newRound,
+        submissions: {},
+        phase: "submit"
+      }
+    }));
+  }
+
+  function sendGameEvent(eventType: string, payload: any) {
+    if (!wsRef.current || !wsConnected) return;
+    
+    wsRef.current.send(JSON.stringify({
+      type: 'game_event',
+      streamId,
+      eventType,
+      payload,
+      from: userId
+    }));
+  }
+
   return (
     <div className="min-h-screen bg-background p-4 md:p-8">
       <div className="mx-auto max-w-7xl space-y-6">
@@ -1683,6 +1834,121 @@ export default function TestHarness() {
             </CardContent>
           </Card>
         </div>
+
+        {/* Phase 5: Game Panel */}
+        {wsConnected && (
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-sm flex items-center gap-2">
+                🎮 Game Rails
+              </CardTitle>
+              <CardDescription className="text-xs">
+                Host-authoritative state sync for lightweight games
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              {/* Host Controls */}
+              {isHost && (
+                <div className="space-y-3">
+                  <div className="space-y-2">
+                    <Label htmlFor="game-select">Game</Label>
+                    <select
+                      id="game-select"
+                      value={selectedGameId}
+                      onChange={(e) => setSelectedGameId(e.target.value)}
+                      className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+                      disabled={!!gameState.gameId}
+                      data-testid="select-game"
+                    >
+                      <option value="caption_comp">Caption Competition</option>
+                      <option value="dont_laugh">Don't Laugh</option>
+                      <option value="image_assoc">Image Association</option>
+                    </select>
+                  </div>
+                  <div className="flex gap-2">
+                    {!gameState.gameId ? (
+                      <Button
+                        onClick={startGame}
+                        variant="default"
+                        className="flex-1"
+                        data-testid="button-start-game"
+                      >
+                        Start Game
+                      </Button>
+                    ) : (
+                      <>
+                        <Button
+                          onClick={nextRound}
+                          variant="default"
+                          data-testid="button-next-round"
+                        >
+                          Next Round
+                        </Button>
+                        <Button
+                          onClick={endGame}
+                          variant="destructive"
+                          data-testid="button-end-game"
+                        >
+                          End Game
+                        </Button>
+                      </>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* Guest/Viewer Action Area */}
+              {!isHost && gameState.gameId && (
+                <div className="space-y-2">
+                  <Label htmlFor="game-input">Submit Caption</Label>
+                  <div className="flex gap-2">
+                    <Input
+                      id="game-input"
+                      placeholder="Enter your caption..."
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') {
+                          const input = e.currentTarget;
+                          sendGameEvent('submit_caption', { text: input.value });
+                          input.value = '';
+                        }
+                      }}
+                      data-testid="input-game-caption"
+                    />
+                  </div>
+                </div>
+              )}
+
+              {/* State Viewer */}
+              {gameState.gameId && (
+                <div className="space-y-2">
+                  <div className="text-xs font-semibold text-muted-foreground">
+                    Game State (v{gameState.version})
+                  </div>
+                  <pre className="rounded-md bg-muted p-3 text-xs overflow-auto max-h-40">
+                    {JSON.stringify(gameState.data, null, 2)}
+                  </pre>
+                </div>
+              )}
+
+              {/* Event Log (Host only) */}
+              {isHost && gameEvents.length > 0 && (
+                <div className="space-y-2">
+                  <div className="text-xs font-semibold text-muted-foreground">
+                    Recent Events (last 5)
+                  </div>
+                  <div className="space-y-1">
+                    {gameEvents.map((evt, idx) => (
+                      <div key={idx} className="text-xs font-mono p-2 rounded bg-muted">
+                        <span className="text-muted-foreground">{evt.from}:</span> {evt.type}{' '}
+                        {JSON.stringify(evt.payload)}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        )}
 
         {/* Connection Telemetry */}
         {connectionStats.size > 0 && (
