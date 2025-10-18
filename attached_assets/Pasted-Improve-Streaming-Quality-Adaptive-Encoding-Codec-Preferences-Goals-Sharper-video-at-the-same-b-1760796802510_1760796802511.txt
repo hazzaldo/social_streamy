@@ -1,0 +1,120 @@
+Improve Streaming Quality: Adaptive Encoding & Codec Preferences
+
+Goals
+
+Sharper video at the same bandwidth.
+
+Smooth recovery on weak networks.
+
+iPhone/Safari compatibility.
+
+1) Capture constraints (talking-head default)
+
+Camera (Host/Guest): prefer 720p @ 30 fps; allow graceful fallback.
+
+Mic: voice-optimized.
+
+// getUserMedia constraints
+{
+  video: {
+    width:  { ideal: 1280, max: 1280 },
+    height: { ideal: 720,  max: 720  },
+    frameRate: { ideal: 30, max: 30 },
+    facingMode: "user"
+  },
+  audio: {
+    echoCancellation: true,
+    noiseSuppression: true,
+    autoGainControl:  true
+  }
+}
+
+
+2) Codec selection (per transceiver)
+
+iOS/Safari first: H.264.
+
+Else prefer VP9, fall back to H.264 (keep AV1 optional).
+
+// after addTrack / addTransceiver
+const preferred = detectSafariIOS()
+  ? ["video/H264"]
+  : ["video/VP9", "video/H264"];
+setCodecPreferencesFor(pc, "video", preferred);
+
+
+3) Sender parameters (adaptive ladder)
+
+Implement a three-step ladder and switch based on your existing health badge/telemetry:
+
+Profile	MaxBitrate	MaxFramerate	ScaleDown
+High	2_500_000	30	1.0
+Medium	1_200_000	30	1.15
+Low	600_000	24	1.5
+
+Rules:
+
+Degrade one step after 3 consecutive “Degraded/Recovering” ticks (≈6s).
+
+Upgrade one step after 10s Good and inbound packet loss <2%.
+
+Apply via RTCRtpSender.setParameters({ encodings: [{ maxBitrate, maxFramerate, scaleResolutionDownBy }] }).
+
+4) Mesh fan-out optimization (Host)
+
+For each viewer PC, set its own sender params (so a weak viewer doesn’t penalize others).
+
+When viewer count > 1, cap default host High→Medium for new viewers; allow per-viewer upgrade later.
+
+5) Degradation preferences & hints
+
+sender.degradationPreference = "balanced" (or "maintain-framerate" for talking head).
+
+videoTrack.contentHint = "motion"; enable "detail" only for screen share mode.
+
+6) Audio quality
+
+Use OPUS with maxBitrate: 64000–96000, ptime: 20, mono unless “Music Mode”.
+
+Prioritize audio on constrained links (sender.setParameters({ priority: "high" }) if supported).
+
+7) Keyframe strategy
+
+On Guest joins, network change, or quality drop → call receiver.requestKeyFrame() on the viewer/host where supported (Chrome).
+
+Also request after renegotiation completes.
+
+8) iPhone/Safari guards
+
+Force H.264, ≤720p30.
+
+Avoid exact 1080p; keep max not exact.
+
+Respect autoplay guard already implemented (tap-to-play overlay).
+
+9) Validation (extend your Validation Runner)
+Add tests:
+
+Q1: Good network → Viewer inbound ≥ 1.2 Mbps, 720p, ~30 fps.
+
+Q2: Throttle to 200 kbps → adaptive drops to Low within 6s; badge shows Degraded.
+
+Q3: Recover to normal → upgrade back to Medium/High within 12–20s.
+
+Q4: Guest join triggers keyframe; first frame < 1s after accept.
+
+Q5: iOS profile check → codec is H.264, ≤720p30.
+
+Record per-test fps/bitrate/resolution from your telemetry and include in the report.
+
+DoD
+
+Visible quality bump on good networks (720p30 stable).
+
+Graceful downshift to Low under throttle; smooth upshift after recovery.
+
+iPhone viewers play reliably (H.264, ≤720p30).
+
+Per-viewer tuning works in mesh (a weak viewer doesn’t reduce others).
+
+Validation Runner shows Q1–Q5 PASS with timings.

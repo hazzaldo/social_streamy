@@ -5,6 +5,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Badge } from '@/components/ui/badge';
 import { useToast } from '@/hooks/use-toast';
 import { Copy, Video, VideoOff, Mic, MicOff, X } from 'lucide-react';
+import { getPlatformConstraints, initializeQualitySettings, reapplyQualitySettings, requestKeyFrame, type AdaptiveQualityManager } from '@/lib/webrtc-quality';
 
 function wsUrl(path = '/ws') {
   const { protocol, host } = window.location;
@@ -68,6 +69,8 @@ export default function Host() {
   const heartbeatIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const reconnectAttemptsRef = useRef(0);
+  const qualityManagers = useRef<Map<string, AdaptiveQualityManager>>(new Map());
+  const monitoringCleanups = useRef<Map<string, () => void>>(new Map());
 
   // WebSocket setup and reconnection
   useEffect(() => {
@@ -206,6 +209,15 @@ export default function Host() {
       });
     }
     
+    // Initialize quality settings (codec prefs, bitrate, audio quality) with monitoring
+    if (localStreamRef.current) {
+      const { qualityManager, stopMonitoring } = await initializeQualitySettings(pc, localStreamRef.current, 'medium', true);
+      qualityManagers.current.set(viewerUserId, qualityManager);
+      if (stopMonitoring) {
+        monitoringCleanups.current.set(viewerUserId, stopMonitoring);
+      }
+    }
+    
     pc.onicecandidate = (event) => {
       if (event.candidate && wsRef.current?.readyState === WebSocket.OPEN) {
         wsRef.current.send(JSON.stringify({
@@ -244,6 +256,15 @@ export default function Host() {
       });
     }
     
+    // Initialize quality settings for guest connection with monitoring
+    if (localStreamRef.current) {
+      const { qualityManager, stopMonitoring } = await initializeQualitySettings(pc, localStreamRef.current, 'high', true);
+      qualityManagers.current.set('guest', qualityManager);
+      if (stopMonitoring) {
+        monitoringCleanups.current.set('guest', stopMonitoring);
+      }
+    }
+    
     // Receive guest tracks
     pc.ontrack = (event) => {
       const [stream] = event.streams;
@@ -251,6 +272,9 @@ export default function Host() {
       if (guestVideoRef.current) {
         guestVideoRef.current.srcObject = stream;
       }
+      
+      // Request keyframe after guest joins for faster first frame
+      requestKeyFrame(pc);
       
       // Fan out guest tracks to all viewers
       setTimeout(() => renegotiateAllViewers(), 500);
@@ -302,6 +326,12 @@ export default function Host() {
           });
         }
         
+        // Reapply quality settings after renegotiation
+        const qualityManager = qualityManagers.current.get(viewerUserId);
+        if (qualityManager) {
+          await reapplyQualitySettings(pc, qualityManager);
+        }
+        
         const offer = await pc.createOffer();
         await pc.setLocalDescription(offer);
         
@@ -323,10 +353,8 @@ export default function Host() {
 
   async function goLive() {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ 
-        video: true, 
-        audio: true 
-      });
+      // Use platform-optimized constraints (720p @ 30fps, voice-optimized audio)
+      const stream = await navigator.mediaDevices.getUserMedia(getPlatformConstraints());
       
       setLocalStream(stream);
       localStreamRef.current = stream;

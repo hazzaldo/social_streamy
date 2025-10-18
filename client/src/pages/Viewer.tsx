@@ -6,6 +6,7 @@ import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { useToast } from '@/hooks/use-toast';
 import { Volume2, VolumeX } from 'lucide-react';
+import { getPlatformConstraints, initializeQualitySettings, requestKeyFrame } from '@/lib/webrtc-quality';
 
 function wsUrl(path = '/ws') {
   const { protocol, host } = window.location;
@@ -68,6 +69,7 @@ export default function Viewer() {
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const reconnectAttemptsRef = useRef(0);
   const roleRef = useRef<Role>('viewer');
+  const stopMonitoringRef = useRef<(() => void) | null>(null);
 
   // Keep roleRef in sync
   useEffect(() => {
@@ -317,10 +319,8 @@ export default function Viewer() {
 
   async function upgradeToGuest() {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ 
-        video: true, 
-        audio: true 
-      });
+      // Use platform-optimized constraints (720p @ 30fps, voice-optimized audio)
+      const stream = await navigator.mediaDevices.getUserMedia(getPlatformConstraints());
       
       localStreamRef.current = stream;
       
@@ -337,12 +337,19 @@ export default function Viewer() {
         pc.addTrack(track, stream);
       });
       
+      // Initialize quality settings for guest connection with monitoring
+      const { stopMonitoring } = await initializeQualitySettings(pc, stream, 'high', true);
+      stopMonitoringRef.current = stopMonitoring;
+      
       // Receive host tracks
       pc.ontrack = (event) => {
         const [stream] = event.streams;
         if (hostVideoRef.current) {
           hostVideoRef.current.srcObject = stream;
         }
+        
+        // Request keyframe for faster first frame
+        requestKeyFrame(pc);
       };
       
       pc.onicecandidate = (event) => {
