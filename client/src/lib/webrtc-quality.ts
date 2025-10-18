@@ -126,6 +126,81 @@ export function getPreferredCodecs(): string[] {
 }
 
 /**
+ * SDP Munging: Force H.264-only by stripping VP8/VP9/AV1 from SDP
+ * Keeps only H.264 with profile-level-id=42e01f (baseline) and packetization-mode=1
+ * TEMPORARY: For debugging black video issue
+ */
+export function forceH264OnlySDP(sdp: string): string {
+  const lines = sdp.split('\r\n');
+  const output: string[] = [];
+  let inVideoSection = false;
+  const h264PayloadTypes: string[] = [];
+  const linesToSkip = new Set<number>();
+
+  // First pass: find H.264 payload types and mark lines to skip
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    
+    // Track when we're in video m= section
+    if (line.startsWith('m=video')) {
+      inVideoSection = true;
+    } else if (line.startsWith('m=')) {
+      inVideoSection = false;
+    }
+
+    if (inVideoSection) {
+      // Find H.264 rtpmap
+      if (line.includes('rtpmap') && line.includes('H264')) {
+        const match = line.match(/rtpmap:(\d+)/);
+        if (match) {
+          h264PayloadTypes.push(match[1]);
+        }
+      }
+      
+      // Mark non-H.264 codec lines for removal
+      if (line.includes('rtpmap') && (line.includes('VP8') || line.includes('VP9') || line.includes('AV1'))) {
+        const match = line.match(/rtpmap:(\d+)/);
+        if (match) {
+          linesToSkip.add(i);
+          // Also skip associated fmtp and rtcp-fb lines
+          for (let j = i + 1; j < lines.length; j++) {
+            if (lines[j].startsWith(`a=fmtp:${match[1]}`) || lines[j].startsWith(`a=rtcp-fb:${match[1]}`)) {
+              linesToSkip.add(j);
+            } else if (lines[j].startsWith('a=rtpmap') || lines[j].startsWith('m=')) {
+              break;
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // Second pass: rebuild SDP, filtering m=video payload list
+  for (let i = 0; i < lines.length; i++) {
+    if (linesToSkip.has(i)) {
+      continue;
+    }
+
+    let line = lines[i];
+    
+    // Filter m=video line to only include H.264 payload types
+    if (line.startsWith('m=video') && h264PayloadTypes.length > 0) {
+      const parts = line.split(' ');
+      if (parts.length > 3) {
+        // Keep first 3 parts (m=video port proto) and only H.264 payload types
+        const filtered = parts.slice(0, 3).concat(h264PayloadTypes);
+        line = filtered.join(' ');
+        console.log('✅ SDP munged: m=video filtered to H.264 only:', h264PayloadTypes.join(','));
+      }
+    }
+
+    output.push(line);
+  }
+
+  return output.join('\r\n');
+}
+
+/**
  * Rank codec by profile quality score (higher = better)
  * Returns -1 to reject, 0+ to accept with priority
  */

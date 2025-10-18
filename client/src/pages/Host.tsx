@@ -5,7 +5,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Badge } from '@/components/ui/badge';
 import { useToast } from '@/hooks/use-toast';
 import { Copy, Video, VideoOff, Mic, MicOff, X } from 'lucide-react';
-import { getPlatformConstraints, initializeQualitySettings, reapplyQualitySettings, requestKeyFrame, setupOptimizedCandidateHandler, addVideoTrackWithSimulcast, enableOpusFecDtx, setPlayoutDelayHint, restartICE, setCodecPreferences, type AdaptiveQualityManager } from '@/lib/webrtc-quality';
+import { getPlatformConstraints, initializeQualitySettings, reapplyQualitySettings, requestKeyFrame, setupOptimizedCandidateHandler, addVideoTrackWithSimulcast, enableOpusFecDtx, setPlayoutDelayHint, restartICE, setCodecPreferences, forceH264OnlySDP, type AdaptiveQualityManager } from '@/lib/webrtc-quality';
 
 function wsUrl(path = '/ws') {
   const { protocol, host } = window.location;
@@ -454,9 +454,10 @@ export default function Host() {
     candidateHandlerCleanups.current.set(viewerUserId, cleanupCandidateHandler);
     
     const offer = await pc.createOffer();
-    // Enable OPUS FEC/DTX for audio resilience
+    // Enable OPUS FEC/DTX for audio resilience + Force H.264 only
     if (offer.sdp) {
       offer.sdp = enableOpusFecDtx(offer.sdp);
+      offer.sdp = forceH264OnlySDP(offer.sdp);
     }
     await pc.setLocalDescription(offer);
     console.log("[HOST] Sending webrtc_offer to", viewerUserId);
