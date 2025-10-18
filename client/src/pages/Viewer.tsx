@@ -170,13 +170,26 @@ export default function Viewer() {
           setRole('viewer');
           setCohostRequestState('idle');
           
+          // Stop quality monitoring if active
+          if (stopMonitoringRef.current) {
+            stopMonitoringRef.current();
+            stopMonitoringRef.current = null;
+          }
+          
           // Stop local tracks
           localStreamRef.current?.getTracks().forEach(track => track.stop());
           localStreamRef.current = null;
           
-          // Close guest peer connection
-          guestPcRef.current?.close();
-          guestPcRef.current = null;
+          // Close guest peer connection (stop senders first)
+          if (guestPcRef.current) {
+            guestPcRef.current.getSenders().forEach(sender => {
+              if (sender.track) {
+                sender.track.stop();
+              }
+            });
+            guestPcRef.current.close();
+            guestPcRef.current = null;
+          }
           
           if (localVideoRef.current) {
             localVideoRef.current.srcObject = null;
@@ -228,14 +241,55 @@ export default function Viewer() {
     connect();
     
     return () => {
+      // Close WebSocket
       if (wsRef.current) {
         wsRef.current.close();
       }
+      
+      // Clear timers
       if (heartbeatIntervalRef.current) {
         clearInterval(heartbeatIntervalRef.current);
       }
       if (reconnectTimeoutRef.current) {
         clearTimeout(reconnectTimeoutRef.current);
+      }
+      
+      // Stop quality monitoring if active
+      if (stopMonitoringRef.current) {
+        stopMonitoringRef.current();
+        stopMonitoringRef.current = null;
+      }
+      
+      // Clean up host peer connection
+      if (hostPcRef.current) {
+        hostPcRef.current.close();
+        hostPcRef.current = null;
+      }
+      
+      // Clean up guest peer connection and local media
+      if (guestPcRef.current) {
+        guestPcRef.current.getSenders().forEach(sender => {
+          if (sender.track) {
+            sender.track.stop();
+          }
+        });
+        guestPcRef.current.close();
+        guestPcRef.current = null;
+      }
+      
+      // Stop local media tracks
+      localStreamRef.current?.getTracks().forEach(track => track.stop());
+      localStreamRef.current = null;
+      
+      // Clear video element refs
+      if (hostVideoRef.current) {
+        hostVideoRef.current.srcObject = null;
+      }
+      if (guestVideoRef.current) {
+        guestVideoRef.current.srcObject = null;
+      }
+      if (localVideoRef.current) {
+        localVideoRef.current.srcObject = null;
       }
     };
   }, [isJoined, streamId, userId]);

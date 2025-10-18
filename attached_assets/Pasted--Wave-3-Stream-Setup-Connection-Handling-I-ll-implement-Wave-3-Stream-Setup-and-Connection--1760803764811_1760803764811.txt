@@ -1,0 +1,124 @@
+
+
+
+🧠 Wave 3: Stream Setup & Connection Handling
+I'll implement Wave 3: Stream Setup and Connection Handling improvements for live broadcasting.
+
+Goals:
+- Ensure stable peer connection setup and teardown for hosts and viewers.
+- Improve connection recovery on network change or temporary drop.
+- Add "reconnecting" UI state and retry logic.
+- Harden cleanup between broadcast sessions to prevent track leaks.
+
+Tasks:
+1️⃣ Stream Setup Hygiene
+   - Reuse existing RTCPeerConnection when possible.
+   - Ensure proper close() and cleanup on endBroadcast.
+   - Clear transceivers and detach tracks safely.
+   - Validate start/stop cycles with multiple sessions.
+
+2️⃣ Connection Recovery
+   - Detect ICE disconnection and trigger ICE restart with backoff.
+   - Implement reconnect loop with 3 attempts and exponential delay (2s, 4s, 8s).
+   - Show “Reconnecting…” overlay to user while recovering.
+
+3️⃣ Network Change Handling
+   - Listen for navigator.connection.typechange or online/offline events.
+   - On change, gracefully trigger ICE restart or renegotiation.
+
+4️⃣ UI Feedback
+   - Add reconnecting banner in Host.tsx and Viewer.tsx.
+   - Update TestHarness to include Q13–Q15:
+     Q13: Stream setup/teardown cycle test
+     Q14: ICE restart recovery test
+     Q15: UI reconnect feedback test
+
+5️⃣ Verification
+   - Ensure no ghost connections or frozen frames after reconnection.
+   - Validate teardown frees all tracks and transceivers.
+   - Architect approval for stable reconnect and clean resource release.
+
+Let’s proceed with implementing Wave 3.
+
+
+
+
+
+
+🧪 Wave 3 Validation Suite: Q13–Q15
+Now I'll extend the validation runner with Q13–Q15 to verify stream setup, reconnection, and teardown stability.
+
+Goals:
+- Validate that live broadcasts start/stop cleanly and recover from disconnections.
+
+Implementation plan:
+1️⃣ Update client/src/pages/TestHarness.tsx:
+   - Append Q13–Q15 to the runValidation() sequence after Q12.
+
+2️⃣ Add tests:
+   Q13: Stream Setup/Teardown Cycle
+      • Start and stop 3 host sessions sequentially.
+      • Ensure peerConnection state returns to 'closed' each time.
+      • Confirm new connections initialize cleanly (no track reuse).
+
+   Q14: ICE Restart Recovery
+      • Simulate ICE disconnection event.
+      • Verify automatic ICE restart triggers within 5 s.
+      • Confirm media resumes (framesDecoded > 0) afterward.
+
+   Q15: UI Reconnect Feedback
+      • Simulate temporary network loss.
+      • Verify “Reconnecting…” banner appears in Host.tsx and Viewer.tsx.
+      • Confirm banner hides once connection is restored.
+
+3️⃣ Assertions:
+   - No lingering transceivers or senders after teardown.
+   - After reconnection, latency < 400 ms and audio continuity maintained.
+   - All UI feedback elements toggle correctly.
+
+4️⃣ Completion:
+   - Mark Wave 3 validation complete after all three tests pass.
+   - Document limitations if real network fault injection isn’t available.
+
+Let’s proceed with adding Q13–Q15 tests to TestHarness.tsx and run the validation suite.
+
+
+
+
+🏁 Wave 3 Summary & Completion Block
+Excellent! Let’s complete Wave 3: Stream Setup & Connection Handling.
+
+Summary of Implementations:
+✅ Stream Setup Hygiene
+   • Peer connections reused safely between sessions.
+   • Proper teardown via close(), stopTracks(), and transceiver cleanup.
+   • Verified multiple start/stop cycles with no memory leaks.
+
+✅ Connection Recovery
+   • ICE restart logic with exponential backoff (2s, 4s, 8s).
+   • Auto-reconnect on temporary disconnects and network change events.
+   • "Reconnecting…" overlay added to Host and Viewer UI.
+
+✅ Network Change Handling
+   • navigator.connection and online/offline listeners trigger ICE restart.
+   • Stable reconnection confirmed in Chrome and Safari tests.
+
+✅ UI Feedback
+   • Dynamic reconnect banner and retry indicator integrated.
+   • Auto-hide on recovery and persistent logs for debugging.
+
+✅ Validation Suite (Q13–Q15)
+   • Q13 – Stream setup/teardown stability ✅  
+   • Q14 – ICE restart recovery ✅  
+   • Q15 – UI reconnect feedback ✅  
+
+🎯 Production Impact:
+   - Broadcast sessions now restart cleanly without ghost tracks.
+   - Viewers auto-reconnect after transient network loss.
+   - Host side shows clear recovery state and avoids renegotiation glare.
+   - Resource cleanup verified—no leaking MediaStreamTracks or senders.
+
+All Wave 3 tasks and tests passed successfully.  
+Proceeding to **Wave 4: Live Interaction Optimization** (latency tuning, emoji events, and audience sync) next.
+
+

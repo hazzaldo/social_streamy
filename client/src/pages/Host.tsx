@@ -160,12 +160,36 @@ export default function Host() {
           setActiveGuestId(null);
           setGuestMuted(false);
           setGuestCamOff(false);
-          guestPcRef.current?.close();
-          guestPcRef.current = null;
+          
+          // Stop quality monitoring for guest
+          const guestMonitoring = monitoringCleanups.current.get('guest');
+          if (guestMonitoring) {
+            guestMonitoring();
+            monitoringCleanups.current.delete('guest');
+          }
+          qualityManagers.current.delete('guest');
+          
+          // Close guest connection (stop senders first)
+          if (guestPcRef.current) {
+            guestPcRef.current.getSenders().forEach(sender => {
+              if (sender.track) {
+                sender.track.stop();
+              }
+            });
+            guestPcRef.current.close();
+            guestPcRef.current = null;
+          }
+          
+          // Stop guest stream tracks
+          guestStreamRef.current?.getTracks().forEach(track => track.stop());
           guestStreamRef.current = null;
+          
           if (guestVideoRef.current) {
             guestVideoRef.current.srcObject = null;
           }
+          
+          // Renegotiate all viewers to remove guest tracks
+          renegotiateAllViewers();
           
           toast({
             title: 'Co-host Ended',
@@ -516,14 +540,27 @@ export default function Host() {
   }
 
   function stopLive() {
+    // Stop local media tracks
     localStreamRef.current?.getTracks().forEach(track => track.stop());
     setLocalStream(null);
+    localStreamRef.current = null;
     setIsLive(false);
     setWsConnected(false);
     
-    // Clean up viewer connections
-    viewerPcs.current.forEach(pc => pc.close());
+    // Clean up viewer connections (stop senders before closing)
+    viewerPcs.current.forEach(pc => {
+      // Stop all sender tracks to ensure clean teardown
+      pc.getSenders().forEach(sender => {
+        if (sender.track) {
+          sender.track.stop();
+        }
+      });
+      pc.close();
+    });
     viewerPcs.current.clear();
+    
+    // Clean up quality managers
+    qualityManagers.current.clear();
     
     // Clean up monitoring
     monitoringCleanups.current.forEach(cleanup => cleanup());
@@ -533,9 +570,33 @@ export default function Host() {
     candidateHandlerCleanups.current.forEach(cleanup => cleanup());
     candidateHandlerCleanups.current.clear();
     
-    // Clean up guest connection
-    guestPcRef.current?.close();
-    guestPcRef.current = null;
+    // Clean up guest connection and streams
+    if (guestPcRef.current) {
+      guestPcRef.current.getSenders().forEach(sender => {
+        if (sender.track) {
+          sender.track.stop();
+        }
+      });
+      guestPcRef.current.close();
+      guestPcRef.current = null;
+    }
+    
+    // Stop guest stream tracks
+    guestStreamRef.current?.getTracks().forEach(track => track.stop());
+    guestStreamRef.current = null;
+    
+    // Clear guest UI state
+    setActiveGuestId(null);
+    setGuestMuted(false);
+    setGuestCamOff(false);
+    
+    // Clear video element refs
+    if (localVideoRef.current) {
+      localVideoRef.current.srcObject = null;
+    }
+    if (guestVideoRef.current) {
+      guestVideoRef.current.srcObject = null;
+    }
   }
 
   function copyInviteLink() {
@@ -582,12 +643,46 @@ export default function Host() {
   }
 
   function endCohost() {
+    // Stop quality monitoring for guest
+    const guestMonitoring = monitoringCleanups.current.get('guest');
+    if (guestMonitoring) {
+      guestMonitoring();
+      monitoringCleanups.current.delete('guest');
+    }
+    qualityManagers.current.delete('guest');
+    
+    // Close guest connection (stop senders first)
+    if (guestPcRef.current) {
+      guestPcRef.current.getSenders().forEach(sender => {
+        if (sender.track) {
+          sender.track.stop();
+        }
+      });
+      guestPcRef.current.close();
+      guestPcRef.current = null;
+    }
+    
+    // Stop guest stream tracks
+    guestStreamRef.current?.getTracks().forEach(track => track.stop());
+    guestStreamRef.current = null;
+    
+    if (guestVideoRef.current) {
+      guestVideoRef.current.srcObject = null;
+    }
+    
+    setActiveGuestId(null);
+    setGuestMuted(false);
+    setGuestCamOff(false);
+    
+    // Notify server
     wsRef.current?.send(JSON.stringify({
       type: 'cohost_ended',
       streamId,
       by: 'host'
     }));
-    setActiveGuestId(null);
+    
+    // Renegotiate all viewers to remove guest tracks
+    renegotiateAllViewers();
   }
 
   function startGame() {
