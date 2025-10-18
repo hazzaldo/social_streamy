@@ -11,7 +11,18 @@ interface Participant {
   role: 'host' | 'viewer' | 'guest';
 }
 
-const rooms = new Map<string, Map<string, Participant>>();
+interface CohostRequest {
+  userId: string;
+  timestamp: number;
+}
+
+interface RoomState {
+  participants: Map<string, Participant>;
+  activeGuestId: string | null;
+  cohostQueue: CohostRequest[];
+}
+
+const rooms = new Map<string, RoomState>();
 
 export async function registerRoutes(app: Express): Promise<Server> {
   // Health endpoints
@@ -76,9 +87,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
           // Get or create room
           if (!rooms.has(streamId)) {
-            rooms.set(streamId, new Map());
+            rooms.set(streamId, {
+              participants: new Map(),
+              activeGuestId: null,
+              cohostQueue: []
+            });
           }
-          const room = rooms.get(streamId)!;
+          const roomState = rooms.get(streamId)!;
+          const room = roomState.participants;
 
           // Determine role: first participant is host, others are viewers
           const role = room.size === 0 ? 'host' : 'viewer';
@@ -116,8 +132,66 @@ export async function registerRoutes(app: Express): Promise<Server> {
           const { streamId, userId } = msg;
           if (!streamId || !userId) return;
 
-          const room = rooms.get(streamId);
-          if (room) {
+          const roomState = rooms.get(streamId);
+          if (roomState) {
+            const room = roomState.participants;
+            const participant = room.get(String(userId));
+            const role = participant?.role;
+
+            // Remove from cohost queue if present
+            const queueIndex = roomState.cohostQueue.findIndex(r => r.userId === String(userId));
+            if (queueIndex !== -1) {
+              roomState.cohostQueue.splice(queueIndex, 1);
+              console.log('🚫 Removed from cohost queue on leave:', userId);
+
+              // Notify host of updated queue
+              const host = Array.from(room.values()).find(p => p.role === 'host');
+              if (host && host.ws.readyState === WebSocket.OPEN) {
+                host.ws.send(JSON.stringify({
+                  type: 'cohost_queue_updated',
+                  streamId,
+                  queue: roomState.cohostQueue.map(r => ({ userId: r.userId, timestamp: r.timestamp }))
+                }));
+              }
+            }
+
+            // If leaving user is active guest, clear session and notify host
+            if (role === 'guest' && roomState.activeGuestId === String(userId)) {
+              roomState.activeGuestId = null;
+              
+              const host = Array.from(room.values()).find(p => p.role === 'host');
+              if (host && host.ws.readyState === WebSocket.OPEN) {
+                host.ws.send(JSON.stringify({
+                  type: 'cohost_ended',
+                  streamId,
+                  by: 'guest',
+                  guestUserId: String(userId)
+                }));
+
+                // Always send queue update (even if empty) to clear host UI
+                host.ws.send(JSON.stringify({
+                  type: 'cohost_queue_updated',
+                  streamId,
+                  queue: roomState.cohostQueue.map(r => ({ userId: r.userId, timestamp: r.timestamp }))
+                }));
+              }
+              console.log('🔚 Active guest left stream, session ended');
+            }
+
+            // If leaving user is host, end cohost session and notify guest
+            if (role === 'host' && roomState.activeGuestId) {
+              const guest = room.get(roomState.activeGuestId);
+              if (guest && guest.ws.readyState === WebSocket.OPEN) {
+                guest.ws.send(JSON.stringify({
+                  type: 'cohost_ended',
+                  streamId,
+                  by: 'host'
+                }));
+              }
+              roomState.activeGuestId = null;
+              console.log('🔚 Host left stream, cohost session ended');
+            }
+
             room.delete(String(userId));
             console.log(`👋 User left stream:`, { streamId, userId, remainingCount: room.size });
 
@@ -148,9 +222,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
           // Special handling: if toUserId is 'host', find the actual host in the room
           let actualToUserId = toUserId;
           if (toUserId === 'host' && currentParticipant) {
-            const room = rooms.get(currentParticipant.streamId);
-            if (room) {
-              const host = Array.from(room.values()).find(p => p.role === 'host');
+            const roomState = rooms.get(currentParticipant.streamId);
+            if (roomState) {
+              const host = Array.from(roomState.participants.values()).find(p => p.role === 'host');
               if (host) {
                 actualToUserId = host.userId;
                 console.log('✅ Resolved "host" to actual userId:', actualToUserId);
@@ -194,9 +268,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
           // Special handling: if toUserId is 'host', find the actual host in the room
           let actualToUserId = toUserId;
           if (toUserId === 'host' && currentParticipant) {
-            const room = rooms.get(currentParticipant.streamId);
-            if (room) {
-              const host = Array.from(room.values()).find(p => p.role === 'host');
+            const roomState = rooms.get(currentParticipant.streamId);
+            if (roomState) {
+              const host = Array.from(roomState.participants.values()).find(p => p.role === 'host');
               if (host) {
                 actualToUserId = host.userId;
                 console.log('✅ Resolved ICE "host" to actual userId:', actualToUserId);
@@ -220,21 +294,77 @@ export async function registerRoutes(app: Express): Promise<Server> {
             return;
           }
 
-          const room = rooms.get(streamId);
-          if (!room) {
+          const roomState = rooms.get(streamId);
+          if (!roomState) {
             console.error('❌ Room not found:', streamId);
             return;
           }
 
-          // Find host and relay request
-          const host = Array.from(room.values()).find(p => p.role === 'host');
+          // Check if there's already an active guest - auto-decline
+          if (roomState.activeGuestId) {
+            relayToUser(String(fromUserId), {
+              type: 'cohost_declined',
+              streamId,
+              reason: 'guest_active'
+            });
+            console.log('🚫 Auto-declined cohost_request (guest already active):', fromUserId);
+            return;
+          }
+
+          // Add to queue if not already there
+          if (!roomState.cohostQueue.find(r => r.userId === String(fromUserId))) {
+            roomState.cohostQueue.push({
+              userId: String(fromUserId),
+              timestamp: Date.now()
+            });
+            console.log('📥 Added to cohost queue:', fromUserId, 'queue length:', roomState.cohostQueue.length);
+          }
+
+          // Find host and relay request + queue update
+          const host = Array.from(roomState.participants.values()).find(p => p.role === 'host');
           if (host && host.ws.readyState === WebSocket.OPEN) {
             host.ws.send(JSON.stringify({
               type: 'cohost_request',
               fromUserId: String(fromUserId),
               streamId
             }));
+            
+            // Send updated queue to host
+            host.ws.send(JSON.stringify({
+              type: 'cohost_queue_updated',
+              streamId,
+              queue: roomState.cohostQueue.map(r => ({ userId: r.userId, timestamp: r.timestamp }))
+            }));
             console.log('✅ Relayed cohost_request to host from:', fromUserId);
+          }
+          break;
+        }
+
+        case 'cohost_cancel': {
+          // Viewer cancels their co-host request
+          const { streamId, userId } = msg;
+          if (!streamId || !userId) {
+            console.error('❌ cohost_cancel missing required fields');
+            return;
+          }
+
+          const roomState = rooms.get(streamId);
+          if (roomState) {
+            const queueIndex = roomState.cohostQueue.findIndex(r => r.userId === String(userId));
+            if (queueIndex !== -1) {
+              roomState.cohostQueue.splice(queueIndex, 1);
+              console.log('🚫 Removed from cohost queue:', userId);
+
+              // Notify host of updated queue
+              const host = Array.from(roomState.participants.values()).find(p => p.role === 'host');
+              if (host && host.ws.readyState === WebSocket.OPEN) {
+                host.ws.send(JSON.stringify({
+                  type: 'cohost_queue_updated',
+                  streamId,
+                  queue: roomState.cohostQueue.map(r => ({ userId: r.userId, timestamp: r.timestamp }))
+                }));
+              }
+            }
           }
           break;
         }
@@ -247,8 +377,25 @@ export async function registerRoutes(app: Express): Promise<Server> {
             return;
           }
 
-          const room = rooms.get(streamId);
-          if (!room) return;
+          const roomState = rooms.get(streamId);
+          if (!roomState) return;
+
+          // Defensive guard: reject if there's already an active guest (unless it's the same user)
+          if (roomState.activeGuestId && roomState.activeGuestId !== String(guestUserId)) {
+            console.error('❌ Cannot accept cohost, guest already active:', roomState.activeGuestId);
+            return;
+          }
+
+          const room = roomState.participants;
+
+          // Remove from queue
+          const queueIndex = roomState.cohostQueue.findIndex(r => r.userId === String(guestUserId));
+          if (queueIndex !== -1) {
+            roomState.cohostQueue.splice(queueIndex, 1);
+          }
+
+          // Set as active guest
+          roomState.activeGuestId = String(guestUserId);
 
           // Update viewer role to guest
           const participant = room.get(String(guestUserId));
@@ -264,22 +411,131 @@ export async function registerRoutes(app: Express): Promise<Server> {
               }));
             }
           }
+
+          // Notify host of updated queue
+          const host = Array.from(room.values()).find(p => p.role === 'host');
+          if (host && host.ws.readyState === WebSocket.OPEN) {
+            host.ws.send(JSON.stringify({
+              type: 'cohost_queue_updated',
+              streamId,
+              queue: roomState.cohostQueue.map(r => ({ userId: r.userId, timestamp: r.timestamp }))
+            }));
+          }
           break;
         }
 
         case 'cohost_decline': {
           // Host declines a viewer's co-host request
-          const { streamId, viewerUserId } = msg;
+          const { streamId, viewerUserId, reason } = msg;
           if (!streamId || !viewerUserId) {
             console.error('❌ cohost_decline missing required fields');
             return;
           }
 
+          const roomState = rooms.get(streamId);
+          if (roomState) {
+            // Remove from queue
+            const queueIndex = roomState.cohostQueue.findIndex(r => r.userId === String(viewerUserId));
+            if (queueIndex !== -1) {
+              roomState.cohostQueue.splice(queueIndex, 1);
+
+              // Notify host of updated queue
+              const host = Array.from(roomState.participants.values()).find(p => p.role === 'host');
+              if (host && host.ws.readyState === WebSocket.OPEN) {
+                host.ws.send(JSON.stringify({
+                  type: 'cohost_queue_updated',
+                  streamId,
+                  queue: roomState.cohostQueue.map(r => ({ userId: r.userId, timestamp: r.timestamp }))
+                }));
+              }
+            }
+          }
+
           // Notify the viewer
           relayToUser(String(viewerUserId), {
             type: 'cohost_declined',
+            streamId,
+            reason
+          });
+          break;
+        }
+
+        case 'cohost_end': {
+          // Host or Guest ends co-host session
+          const { streamId, by } = msg;
+          if (!streamId || !by) {
+            console.error('❌ cohost_end missing required fields');
+            return;
+          }
+
+          const roomState = rooms.get(streamId);
+          if (!roomState || !roomState.activeGuestId) return;
+
+          const guestUserId = roomState.activeGuestId;
+          const room = roomState.participants;
+          const guest = room.get(guestUserId);
+
+          // Clear active guest
+          roomState.activeGuestId = null;
+
+          // Demote guest back to viewer
+          if (guest) {
+            guest.role = 'viewer';
+            console.log('✅ Demoted guest to viewer:', guestUserId);
+          }
+
+          // Notify both host and guest
+          const host = Array.from(room.values()).find(p => p.role === 'host');
+          if (host && host.ws.readyState === WebSocket.OPEN) {
+            host.ws.send(JSON.stringify({
+              type: 'cohost_ended',
+              streamId,
+              by,
+              guestUserId
+            }));
+
+            // Always send queue update (even if empty) to update host UI
+            host.ws.send(JSON.stringify({
+              type: 'cohost_queue_updated',
+              streamId,
+              queue: roomState.cohostQueue.map(r => ({ userId: r.userId, timestamp: r.timestamp }))
+            }));
+          }
+          if (guest && guest.ws.readyState === WebSocket.OPEN) {
+            guest.ws.send(JSON.stringify({
+              type: 'cohost_ended',
+              streamId,
+              by
+            }));
+          }
+
+          console.log('🔚 Cohost session ended by:', by);
+          break;
+        }
+
+        case 'cohost_mute':
+        case 'cohost_unmute':
+        case 'cohost_cam_off':
+        case 'cohost_cam_on': {
+          // Host controls Guest audio/video
+          const { streamId, target } = msg;
+          if (!streamId || target !== 'guest') {
+            console.error('❌ Control message invalid:', msg.type);
+            return;
+          }
+
+          const roomState = rooms.get(streamId);
+          if (!roomState || !roomState.activeGuestId) {
+            console.warn('⚠️ No active guest for control:', msg.type);
+            return;
+          }
+
+          // Relay control message to guest
+          relayToUser(roomState.activeGuestId, {
+            type: msg.type,
             streamId
           });
+          console.log('📤 Relayed control to guest:', msg.type);
           break;
         }
 
@@ -292,9 +548,66 @@ export async function registerRoutes(app: Express): Promise<Server> {
       console.log('🔌 WebSocket disconnected');
       // Clean up participant
       if (currentParticipant) {
-        const { streamId, userId } = currentParticipant;
-        const room = rooms.get(streamId);
-        if (room) {
+        const { streamId, userId, role } = currentParticipant;
+        const roomState = rooms.get(streamId);
+        if (roomState) {
+          const room = roomState.participants;
+
+          // Remove from cohost queue if present
+          const queueIndex = roomState.cohostQueue.findIndex(r => r.userId === userId);
+          if (queueIndex !== -1) {
+            roomState.cohostQueue.splice(queueIndex, 1);
+            console.log('🚫 Removed from cohost queue on disconnect:', userId);
+
+            // Notify host of updated queue
+            const host = Array.from(room.values()).find(p => p.role === 'host');
+            if (host && host.ws.readyState === WebSocket.OPEN) {
+              host.ws.send(JSON.stringify({
+                type: 'cohost_queue_updated',
+                streamId,
+                queue: roomState.cohostQueue.map(r => ({ userId: r.userId, timestamp: r.timestamp }))
+              }));
+            }
+          }
+
+          // If disconnecting user is active guest, end cohost session
+          if (role === 'guest' && roomState.activeGuestId === userId) {
+            roomState.activeGuestId = null;
+            
+            // Notify host with updated queue
+            const host = Array.from(room.values()).find(p => p.role === 'host');
+            if (host && host.ws.readyState === WebSocket.OPEN) {
+              host.ws.send(JSON.stringify({
+                type: 'cohost_ended',
+                streamId,
+                by: 'guest',
+                guestUserId: userId
+              }));
+
+              // Always send queue update (even if empty) to update host UI
+              host.ws.send(JSON.stringify({
+                type: 'cohost_queue_updated',
+                streamId,
+                queue: roomState.cohostQueue.map(r => ({ userId: r.userId, timestamp: r.timestamp }))
+              }));
+            }
+            console.log('🔚 Guest disconnected, cohost session ended');
+          }
+
+          // If disconnecting user is host, end cohost session and notify guest
+          if (role === 'host' && roomState.activeGuestId) {
+            const guest = room.get(roomState.activeGuestId);
+            if (guest && guest.ws.readyState === WebSocket.OPEN) {
+              guest.ws.send(JSON.stringify({
+                type: 'cohost_ended',
+                streamId,
+                by: 'host'
+              }));
+            }
+            roomState.activeGuestId = null;
+            console.log('🔚 Host disconnected, cohost session ended');
+          }
+
           room.delete(userId);
           if (room.size === 0) {
             rooms.delete(streamId);
@@ -318,8 +631,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Helper functions
   function relayToUser(userId: string, message: any) {
     // Find user across all rooms
-    for (const room of rooms.values()) {
-      const participant = room.get(String(userId));
+    for (const roomState of Array.from(rooms.values())) {
+      const participant = roomState.participants.get(String(userId));
       if (participant && participant.ws.readyState === WebSocket.OPEN) {
         participant.ws.send(JSON.stringify(message));
         console.log('✅ Relayed to user:', userId, message.type);
@@ -330,10 +643,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
   }
 
   function broadcastToRoom(streamId: string, message: any) {
-    const room = rooms.get(streamId);
-    if (!room) return;
+    const roomState = rooms.get(streamId);
+    if (!roomState) return;
 
-    for (const participant of room.values()) {
+    for (const participant of Array.from(roomState.participants.values())) {
       if (participant.ws.readyState === WebSocket.OPEN) {
         participant.ws.send(JSON.stringify(message));
       }
