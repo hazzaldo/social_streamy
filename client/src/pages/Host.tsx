@@ -5,7 +5,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Badge } from '@/components/ui/badge';
 import { useToast } from '@/hooks/use-toast';
 import { Copy, Video, VideoOff, Mic, MicOff, X } from 'lucide-react';
-import { getPlatformConstraints, initializeQualitySettings, reapplyQualitySettings, requestKeyFrame, type AdaptiveQualityManager } from '@/lib/webrtc-quality';
+import { getPlatformConstraints, initializeQualitySettings, reapplyQualitySettings, requestKeyFrame, setupOptimizedCandidateHandler, type AdaptiveQualityManager } from '@/lib/webrtc-quality';
 
 function wsUrl(path = '/ws') {
   const { protocol, host } = window.location;
@@ -71,6 +71,7 @@ export default function Host() {
   const reconnectAttemptsRef = useRef(0);
   const qualityManagers = useRef<Map<string, AdaptiveQualityManager>>(new Map());
   const monitoringCleanups = useRef<Map<string, () => void>>(new Map());
+  const candidateHandlerCleanups = useRef<Map<string, () => void>>(new Map());
 
   // WebSocket setup and reconnection
   useEffect(() => {
@@ -218,16 +219,22 @@ export default function Host() {
       }
     }
     
-    pc.onicecandidate = (event) => {
-      if (event.candidate && wsRef.current?.readyState === WebSocket.OPEN) {
-        wsRef.current.send(JSON.stringify({
-          type: 'ice_candidate',
-          streamId,
-          toUserId: viewerUserId,
-          candidate: event.candidate
-        }));
-      }
-    };
+    // Setup optimized ICE candidate handler (stops forwarding after connection established)
+    const cleanupCandidateHandler = setupOptimizedCandidateHandler(
+      pc,
+      (candidate) => {
+        if (wsRef.current?.readyState === WebSocket.OPEN) {
+          wsRef.current.send(JSON.stringify({
+            type: 'ice_candidate',
+            streamId,
+            toUserId: viewerUserId,
+            candidate: candidate
+          }));
+        }
+      },
+      `host→viewer-${viewerUserId.substring(0, 8)}`
+    );
+    candidateHandlerCleanups.current.set(viewerUserId, cleanupCandidateHandler);
     
     const offer = await pc.createOffer();
     await pc.setLocalDescription(offer);
@@ -383,8 +390,20 @@ export default function Host() {
     setLocalStream(null);
     setIsLive(false);
     setWsConnected(false);
+    
+    // Clean up viewer connections
     viewerPcs.current.forEach(pc => pc.close());
     viewerPcs.current.clear();
+    
+    // Clean up monitoring
+    monitoringCleanups.current.forEach(cleanup => cleanup());
+    monitoringCleanups.current.clear();
+    
+    // Clean up candidate handlers
+    candidateHandlerCleanups.current.forEach(cleanup => cleanup());
+    candidateHandlerCleanups.current.clear();
+    
+    // Clean up guest connection
     guestPcRef.current?.close();
     guestPcRef.current = null;
   }

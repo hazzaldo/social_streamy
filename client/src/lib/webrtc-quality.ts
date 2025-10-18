@@ -840,6 +840,9 @@ export async function initializeQualitySettings(
     stopMonitoring = startHealthMonitoring(pc, qualityManager);
   }
   
+  // 8. Connection optimizations
+  checkTWCCSupport(); // Log TWCC support status
+  
   console.log('✅ WebRTC quality settings initialized');
   return { qualityManager, stopMonitoring };
 }
@@ -867,4 +870,109 @@ export async function reapplyQualitySettings(
   setDegradationPreference(pc, 'balanced');
   
   console.log('✅ Quality settings reapplied after renegotiation');
+}
+
+// ============================================================================
+// 10. Connection Optimizations
+// ============================================================================
+
+/**
+ * Check if TWCC (Transport Wide Congestion Control) is supported/enabled
+ * TWCC provides better congestion control by allowing receivers to send feedback
+ * about all packets, not just key frames
+ * 
+ * Returns true if TWCC extension is found in sender capabilities
+ */
+export function checkTWCCSupport(): boolean {
+  try {
+    const capabilities = RTCRtpSender.getCapabilities('video');
+    if (!capabilities || !capabilities.headerExtensions) {
+      return false;
+    }
+    
+    // Look for TWCC header extension
+    // URI: http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01
+    const twccExtension = capabilities.headerExtensions.find(ext => 
+      ext.uri === 'http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01' ||
+      ext.uri.includes('transport-wide-cc-extensions')
+    );
+    
+    if (twccExtension) {
+      console.log('✅ TWCC (Transport Wide Congestion Control) is supported');
+      return true;
+    } else {
+      console.log('⚠️  TWCC not found in sender capabilities');
+      return false;
+    }
+  } catch (err) {
+    console.warn('⚠️  Failed to check TWCC support:', err);
+    return false;
+  }
+}
+
+/**
+ * Create a wrapper for ICE candidate handler that stops forwarding candidates
+ * after successful connection
+ * 
+ * This reduces server load and network traffic by preventing unnecessary candidates
+ * after the connection is stable
+ * 
+ * NOTE: This utility function is available but not yet integrated into Host/Viewer/TestHarness.
+ * Integration requires refactoring onicecandidate handlers in those files to use this wrapper.
+ * 
+ * Example usage (when integrating):
+ * ```
+ * const cleanup = setupOptimizedCandidateHandler(
+ *   pc,
+ *   (candidate) => {
+ *     ws.send(JSON.stringify({ type: 'ice_candidate', candidate }));
+ *   },
+ *   'viewer-123'
+ * );
+ * ```
+ * 
+ * @param pc RTCPeerConnection to monitor
+ * @param onCandidate Callback to forward candidates (e.g., send via WebSocket)
+ * @param label Optional label for logging
+ * @returns Cleanup function to remove event listeners
+ */
+export function setupOptimizedCandidateHandler(
+  pc: RTCPeerConnection,
+  onCandidate: (candidate: RTCIceCandidate) => void,
+  label: string = 'peer'
+): () => void {
+  let shouldForwardCandidates = true;
+  
+  // Handle ICE candidates
+  const candidateHandler = (event: RTCPeerConnectionIceEvent) => {
+    if (event.candidate && shouldForwardCandidates) {
+      onCandidate(event.candidate);
+    } else if (event.candidate && !shouldForwardCandidates) {
+      console.log(`🔌 ${label}: Suppressing candidate after connection established`);
+    }
+  };
+  
+  // Monitor connection state
+  const stateHandler = () => {
+    const state = pc.connectionState;
+    
+    // Once connected, stop forwarding new candidates
+    if (state === 'connected' && shouldForwardCandidates) {
+      shouldForwardCandidates = false;
+      console.log(`🔌 ${label}: Connection established, stopping candidate forwarding to save bandwidth`);
+    } else if ((state === 'connecting' || state === 'failed' || state === 'disconnected') && !shouldForwardCandidates) {
+      // Re-enable if connection is restarting or degrading (ICE restart support)
+      shouldForwardCandidates = true;
+      console.log(`⚠️  ${label}: Connection ${state}, re-enabling candidate forwarding for ICE restart/recovery`);
+    }
+  };
+  
+  pc.addEventListener('icecandidate', candidateHandler);
+  pc.addEventListener('connectionstatechange', stateHandler);
+  
+  // Return cleanup function
+  return () => {
+    pc.removeEventListener('icecandidate', candidateHandler);
+    pc.removeEventListener('connectionstatechange', stateHandler);
+  };
 }
