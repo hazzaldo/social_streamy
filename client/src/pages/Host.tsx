@@ -5,7 +5,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Badge } from '@/components/ui/badge';
 import { useToast } from '@/hooks/use-toast';
 import { Copy, Video, VideoOff, Mic, MicOff, X } from 'lucide-react';
-import { getPlatformConstraints, initializeQualitySettings, reapplyQualitySettings, requestKeyFrame, setupOptimizedCandidateHandler, type AdaptiveQualityManager } from '@/lib/webrtc-quality';
+import { getPlatformConstraints, initializeQualitySettings, reapplyQualitySettings, requestKeyFrame, setupOptimizedCandidateHandler, addVideoTrackWithSimulcast, type AdaptiveQualityManager } from '@/lib/webrtc-quality';
 
 function wsUrl(path = '/ws') {
   const { protocol, host } = window.location;
@@ -196,18 +196,26 @@ export default function Host() {
     const pc = new RTCPeerConnection(ICE_CONFIG);
     viewerPcs.current.set(viewerUserId, pc);
     
-    // Add host tracks
+    // Add host tracks (use simulcast for video)
     if (localStreamRef.current) {
-      localStreamRef.current.getTracks().forEach(track => {
-        pc.addTrack(track, localStreamRef.current!);
-      });
+      for (const track of localStreamRef.current.getTracks()) {
+        if (track.kind === 'video') {
+          await addVideoTrackWithSimulcast(pc, track, localStreamRef.current);
+        } else {
+          pc.addTrack(track, localStreamRef.current);
+        }
+      }
     }
     
-    // Add guest tracks if available
+    // Add guest tracks if available (use simulcast for video)
     if (guestStreamRef.current) {
-      guestStreamRef.current.getTracks().forEach(track => {
-        pc.addTrack(track, guestStreamRef.current!);
-      });
+      for (const track of guestStreamRef.current.getTracks()) {
+        if (track.kind === 'video') {
+          await addVideoTrackWithSimulcast(pc, track, guestStreamRef.current);
+        } else {
+          pc.addTrack(track, guestStreamRef.current);
+        }
+      }
     }
     
     // Initialize quality settings (codec prefs, bitrate, audio quality) with monitoring
@@ -256,11 +264,15 @@ export default function Host() {
     guestPcRef.current = pc;
     setActiveGuestId(guestUserId);
     
-    // Add local tracks to guest connection
+    // Add local tracks to guest connection (use simulcast for video)
     if (localStreamRef.current) {
-      localStreamRef.current.getTracks().forEach(track => {
-        pc.addTrack(track, localStreamRef.current!);
-      });
+      for (const track of localStreamRef.current.getTracks()) {
+        if (track.kind === 'video') {
+          await addVideoTrackWithSimulcast(pc, track, localStreamRef.current);
+        } else {
+          pc.addTrack(track, localStreamRef.current);
+        }
+      }
     }
     
     // Initialize quality settings for guest connection with monitoring
@@ -319,18 +331,26 @@ export default function Host() {
           pc.removeTrack(sender);
         }
         
-        // Add host tracks
+        // Add host tracks (use simulcast for video)
         if (localStreamRef.current) {
-          localStreamRef.current.getTracks().forEach(track => {
-            pc.addTrack(track, localStreamRef.current!);
-          });
+          for (const track of localStreamRef.current.getTracks()) {
+            if (track.kind === 'video') {
+              await addVideoTrackWithSimulcast(pc, track, localStreamRef.current);
+            } else {
+              pc.addTrack(track, localStreamRef.current);
+            }
+          }
         }
         
-        // Add guest tracks if available
+        // Add guest tracks if available (use simulcast for video)
         if (guestStreamRef.current) {
-          guestStreamRef.current.getTracks().forEach(track => {
-            pc.addTrack(track, guestStreamRef.current!);
-          });
+          for (const track of guestStreamRef.current.getTracks()) {
+            if (track.kind === 'video') {
+              await addVideoTrackWithSimulcast(pc, track, guestStreamRef.current);
+            } else {
+              pc.addTrack(track, guestStreamRef.current);
+            }
+          }
         }
         
         // Reapply quality settings after renegotiation

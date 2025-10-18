@@ -7,6 +7,7 @@ import { Badge } from '@/components/ui/badge';
 import { VideoIcon, WifiIcon, WifiOffIcon, UserIcon, RadioIcon } from 'lucide-react';
 import { SignalingStress } from '@/components/SignalingStress';
 import { wsUrl } from '@/lib/wsUrl';
+import { addVideoTrackWithSimulcast } from '@/lib/webrtc-quality';
 
 type Role = 'host' | 'viewer' | 'guest';
 
@@ -647,15 +648,25 @@ export default function TestHarness() {
     // Setup connection state monitoring for ICE restart
     setupConnectionStateMonitoring(pc, viewerId);
 
-    // Add Host tracks
-    local.getTracks().forEach(t => pc.addTrack(t, local));
+    // Add Host tracks (use simulcast for video)
+    for (const t of local.getTracks()) {
+      if (t.kind === 'video') {
+        await addVideoTrackWithSimulcast(pc, t, local);
+      } else {
+        pc.addTrack(t, local);
+      }
+    }
 
-    // Phase 3: Add Guest tracks if available
+    // Phase 3: Add Guest tracks if available (use simulcast for video)
     if (guestStreamRef.current) {
-      guestStreamRef.current.getTracks().forEach(t => {
-        pc.addTrack(t, guestStreamRef.current!);
+      for (const t of guestStreamRef.current.getTracks()) {
+        if (t.kind === 'video') {
+          await addVideoTrackWithSimulcast(pc, t, guestStreamRef.current);
+        } else {
+          pc.addTrack(t, guestStreamRef.current);
+        }
         console.log(`📤 Host: Adding Guest ${t.kind} track to viewer ${viewerId}`);
-      });
+      }
     }
 
     pc.onicecandidate = ev => {
@@ -780,8 +791,14 @@ export default function TestHarness() {
       // Setup connection state monitoring for ICE restart
       setupConnectionStateMonitoring(pc, msg.fromUserId);
 
-      // Host sends tracks to Guest
-      local.getTracks().forEach(t => pc!.addTrack(t, local));
+      // Host sends tracks to Guest (use simulcast for video)
+      for (const t of local.getTracks()) {
+        if (t.kind === 'video') {
+          await addVideoTrackWithSimulcast(pc!, t, local);
+        } else {
+          pc!.addTrack(t, local);
+        }
+      }
 
       // Host receives tracks from Guest
       pc.ontrack = ev => {
@@ -832,8 +849,14 @@ export default function TestHarness() {
     // Setup connection state monitoring for ICE restart
     setupConnectionStateMonitoring(pc, 'guest-to-host');
 
-    // Guest sends their tracks to Host
-    local.getTracks().forEach(t => pc.addTrack(t, local));
+    // Guest sends their tracks to Host (use simulcast for video)
+    for (const t of local.getTracks()) {
+      if (t.kind === 'video') {
+        await addVideoTrackWithSimulcast(pc, t, local);
+      } else {
+        pc.addTrack(t, local);
+      }
+    }
 
     // Guest receives tracks from Host
     pc.ontrack = ev => {
@@ -895,14 +918,18 @@ export default function TestHarness() {
       const guestTracks = guestStreamRef.current.getTracks();
       
       let tracksAdded = false;
-      guestTracks.forEach((track: MediaStreamTrack) => {
+      for (const track of guestTracks) {
         const existingSender = senders.find(s => s.track?.id === track.id);
         if (!existingSender) {
-          pc.addTrack(track, guestStreamRef.current!);
+          if (track.kind === 'video') {
+            await addVideoTrackWithSimulcast(pc, track, guestStreamRef.current!);
+          } else {
+            pc.addTrack(track, guestStreamRef.current!);
+          }
           console.log(`📤 Fan-out: Added Guest ${track.kind} track to viewer ${viewerId}`);
           tracksAdded = true;
         }
-      });
+      }
 
       // Renegotiate if we added new tracks
       if (tracksAdded) {

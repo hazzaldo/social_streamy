@@ -42,6 +42,14 @@ export function detectSafariIOS(): boolean {
 }
 
 /**
+ * Detect if browser is Chromium-based (Chrome/Edge)
+ */
+export function isChromium(): boolean {
+  const ua = navigator.userAgent;
+  return /Chrome|Chromium|Edg|HeadlessChrome/.test(ua);
+}
+
+/**
  * Detect if browser supports scalability mode (SVC)
  * Chrome/Edge support it, Safari/iOS do not
  * 
@@ -57,9 +65,7 @@ export function supportsScalabilityMode(): boolean {
   
   // Chrome/Chromium/Edge support scalability mode
   // Check for Chrome/Chromium first before Safari (since Chrome UA includes "Safari")
-  const isChromium = /Chrome|Chromium|Edg|HeadlessChrome/.test(ua);
-  
-  return isChromium;
+  return isChromium();
 }
 
 /**
@@ -121,6 +127,100 @@ export function setCodecPreferences(
   }
 }
 
+/**
+ * Add video track to peer connection with simulcast/SVC support
+ * 
+ * Chrome/Edge (non-iOS): Uses simulcast with 3 layers (q/m/h)
+ * Chrome/Edge (fallback): Uses SVC L1T3
+ * iOS/Safari: Uses single-layer H.264
+ * 
+ * Reuses existing transceivers during renegotiation to avoid SDP bloat
+ * 
+ * @param pc RTCPeerConnection
+ * @param videoTrack MediaStreamTrack (video)
+ * @param stream MediaStream containing the track
+ * @returns RTCRtpSender for further configuration
+ */
+export async function addVideoTrackWithSimulcast(
+  pc: RTCPeerConnection,
+  videoTrack: MediaStreamTrack,
+  stream: MediaStream
+): Promise<RTCRtpSender> {
+  const supportsRid = typeof RTCRtpTransceiver !== "undefined";
+  const isChromiumBrowser = isChromium();
+  const isIOSBrowser = detectSafariIOS();
+
+  // Check for existing video transceiver to reuse (for renegotiation)
+  // Look for transceivers with no active sender track (null or stopped)
+  const transceivers = pc.getTransceivers();
+  const existingVideoTransceiver = transceivers.find(
+    t => t.receiver.track?.kind === 'video' && 
+         (!t.sender.track || t.sender.track.readyState === 'ended')
+  );
+
+  // Chrome/Edge (non-iOS): Simulcast with 3 layers
+  if (supportsRid && isChromiumBrowser && !isIOSBrowser) {
+    try {
+      let transceiver: RTCRtpTransceiver;
+      
+      // Reuse existing transceiver or create new one
+      if (existingVideoTransceiver) {
+        await existingVideoTransceiver.sender.replaceTrack(videoTrack);
+        existingVideoTransceiver.direction = "sendonly";
+        transceiver = existingVideoTransceiver;
+        console.log("✅ Reused existing transceiver for simulcast");
+      } else {
+        transceiver = pc.addTransceiver(videoTrack, {
+          direction: "sendonly",
+          streams: [stream],
+          sendEncodings: [
+            { rid: "q", scaleResolutionDownBy: 2.0, maxBitrate: 350_000 },
+            { rid: "m", scaleResolutionDownBy: 1.5, maxBitrate: 900_000 },
+            { rid: "h", scaleResolutionDownBy: 1.0, maxBitrate: 2_000_000 },
+          ],
+        });
+        console.log("✅ Simulcast enabled with 3 layers (q/m/h)");
+      }
+      
+      return transceiver.sender;
+    } catch (err) {
+      console.warn("⚠️  Simulcast failed, falling back to SVC:", err);
+    }
+  }
+
+  // Fallback: Add track normally (reuse existing if possible), then try SVC L1T3 if Chromium
+  let sender: RTCRtpSender;
+  
+  if (existingVideoTransceiver) {
+    await existingVideoTransceiver.sender.replaceTrack(videoTrack);
+    existingVideoTransceiver.direction = "sendonly";
+    sender = existingVideoTransceiver.sender;
+    console.log("✅ Reused existing transceiver for fallback");
+  } else {
+    sender = pc.addTrack(videoTrack, stream);
+  }
+
+  if (isChromiumBrowser && !isIOSBrowser) {
+    try {
+      const params = sender.getParameters();
+      if (!params.encodings || params.encodings.length === 0) {
+        params.encodings = [{}];
+      }
+      // @ts-ignore - scalabilityMode not in RTCRtpEncodingParameters type yet
+      params.encodings[0].scalabilityMode = "L1T3";
+      params.encodings[0].maxBitrate = 1_500_000;
+      await sender.setParameters(params);
+      console.log("✅ SVC L1T3 enabled as fallback");
+    } catch (err) {
+      console.warn("⚠️  SVC L1T3 failed, using single layer:", err);
+    }
+  } else {
+    console.log("✅ Single-layer video track (iOS/Safari)");
+  }
+
+  return sender;
+}
+
 // ============================================================================
 // 3. Adaptive Bitrate Ladder
 // ============================================================================
@@ -156,7 +256,8 @@ export const BITRATE_PROFILES: Record<QualityProfile, BitrateProfile> = {
 
 /**
  * Apply bitrate profile to all video senders
- * Includes scalabilityMode for Chrome/Edge with VP9/AV1
+ * Handles both simulcast (multiple encodings) and single-layer streams
+ * Includes scalabilityMode for Chrome/Edge with VP9/AV1 (single-layer only)
  */
 export async function applyBitrateProfile(
   pc: RTCPeerConnection,
@@ -174,23 +275,46 @@ export async function applyBitrateProfile(
         params.encodings = [{}];
       }
 
-      params.encodings[0].maxBitrate = config.maxBitrate;
-      params.encodings[0].maxFramerate = config.maxFramerate;
-      params.encodings[0].scaleResolutionDownBy = config.scaleResolutionDownBy;
+      // Detect simulcast (multiple encodings with RIDs)
+      const isSimulcast = params.encodings.length > 1 && 
+                          params.encodings.some(e => 'rid' in e);
 
-      // Add scalability mode for Chrome/Edge (L1T3 = 1 spatial layer, 3 temporal layers)
-      // This provides better quality under bandwidth fluctuations
-      // Only for VP9/AV1, not H.264 (iOS uses H.264 which doesn't support SVC)
-      if (useScalabilityMode) {
-        (params.encodings[0] as any).scalabilityMode = 'L1T3';
+      if (isSimulcast) {
+        // Simulcast mode: Adjust all layers proportionally
+        // Don't override RID-based configs, just adjust bitrate/framerate
+        for (const encoding of params.encodings) {
+          // Scale each layer's bitrate based on its existing scaleResolutionDownBy
+          const layerScale = encoding.scaleResolutionDownBy || 1.0;
+          // Higher scale = lower quality layer, so inverse relationship
+          const bitrateMultiplier = 1.0 / (layerScale * layerScale);
+          
+          encoding.maxBitrate = Math.floor(config.maxBitrate * bitrateMultiplier);
+          encoding.maxFramerate = config.maxFramerate;
+          // Keep existing scaleResolutionDownBy for each layer (set during addTransceiver)
+        }
+      } else {
+        // Single-layer mode: Use standard approach
+        params.encodings[0].maxBitrate = config.maxBitrate;
+        params.encodings[0].maxFramerate = config.maxFramerate;
+        params.encodings[0].scaleResolutionDownBy = config.scaleResolutionDownBy;
+
+        // Add scalability mode for Chrome/Edge (L1T3 = 1 spatial layer, 3 temporal layers)
+        // Only for single-layer (not simulcast - RID and scalabilityMode are mutually exclusive)
+        if (useScalabilityMode) {
+          (params.encodings[0] as any).scalabilityMode = 'L1T3';
+        }
       }
 
       try {
         await sender.setParameters(params);
-        console.log(`✅ Applied ${profile} profile to sender:`, {
-          ...config,
-          scalabilityMode: useScalabilityMode ? 'L1T3' : 'none'
-        });
+        if (isSimulcast) {
+          console.log(`✅ Applied ${profile} profile to simulcast sender (${params.encodings.length} layers)`);
+        } else {
+          console.log(`✅ Applied ${profile} profile to single-layer sender:`, {
+            ...config,
+            scalabilityMode: useScalabilityMode ? 'L1T3' : 'none'
+          });
+        }
       } catch (err) {
         console.warn(`⚠️  Failed to set sender parameters:`, err);
       }

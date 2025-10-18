@@ -1,0 +1,199 @@
+Task: Advanced Adaptive Streaming — Simulcast/SVC, Codec Hygiene, Keyframe & Glare Safety, Screen-Share Profile, Transport Stability, + Validation Q9–Q12
+
+Goals
+
+Better quality on good networks, smoother stability on bad ones.
+
+Chrome/Edge: use simulcast (or SVC fallback). iOS/Safari: safe H.264 single stream.
+
+Stronger audio resilience, fewer decoder resets, safer renegotiation.
+
+1) Simulcast/SVC ladders (Chromium only, fallback on others)
+
+Implement
+
+In webrtc-quality.ts (or where PCs are created), when sending camera video on non-iOS Chromium:
+
+const supportsRid = typeof RTCRtpTransceiver !== "undefined";
+if (supportsRid && isChromium && !isIOS) {
+  pc.addTransceiver(localVideoTrack, {
+    direction: "sendonly",
+    streams: [localStream],
+    sendEncodings: [
+      { rid: "q", scaleResolutionDownBy: 2.0, maxBitrate: 350_000 },
+      { rid: "m", scaleResolutionDownBy: 1.5, maxBitrate: 900_000 },
+      { rid: "h", scaleResolutionDownBy: 1.0, maxBitrate: 2_000_000 },
+    ],
+  });
+} else {
+  const sender = pc.addTrack(localVideoTrack, localStream);
+  // Fallback SVC (Chromium): apply after sender available
+  try {
+    const p = sender.getParameters();
+    p.encodings = [{ scalabilityMode: "L1T3", maxBitrate: 1_500_000 }];
+    await sender.setParameters(p);
+  } catch {}
+}
+
+
+Keep iOS/Safari single-layer H.264 (no simulcast).
+
+DoD
+
+On Chrome desktop, getStats shows multiple RTP encodings (simulcast), or encodings with scalabilityMode L1T3 (SVC fallback).
+
+2) Codec profile hygiene
+
+Implement
+
+H.264 (iOS/Safari): SDP munging guard to prefer:
+
+profile-level-id=42e01f (Constrained Baseline), packetization-mode=1.
+
+VP9: prefer profile 0 (broad HW decode). Keep scalabilityMode:"L1T3".
+
+AV1: feature flag ENABLE_AV1=false by default. If true on Chrome desktop, use L1T3 and cap ~1.5–2 Mbps.
+
+DoD
+
+iPhone viewers play reliably; no decoder resets on older iOS. Telemetry shows H.264 on iOS, VP9/AV1 on desktop where allowed.
+
+3) Audio resilience (OPUS FEC/DTX + priority)
+
+Implement
+
+Ensure OPUS fmtp contains: useinbandfec=1;usedtx=1;maxaveragebitrate=96000;stereo=0.
+
+When health badge becomes Degraded/Recovering, temporarily increase audio priority and allow video downscale (use degradationPreference:"maintain-framerate" or "balanced"; clamp maxBitrate for video in the ladder for 8s dwell).
+
+DoD
+
+Under 200 kbps throttle, speech remains intelligible; telemetry shows audio stable despite video downscale.
+
+4) Jitter & keyframe polish
+
+Implement
+
+After guest accept, renegotiation complete, ICE restart, or viewer join:
+
+receiver?.requestKeyFrame?.();
+sender?.generateKeyFrame?.(); // fallback Chromium
+
+
+If framesDecoded stalls >2s while bytes still increase → trigger keyframe request + reset dwell timer in quality manager.
+
+DoD
+
+First frame after join/accept < ~1s. “Frozen frame” test recovers within ≤1.5s.
+
+5) Renegotiation & glare safety
+
+Implement
+
+Renegotiation queue (polite peer):
+
+let negotiating = false, needsRenegotiate = false;
+async function safeRenegotiate(makeOffer: () => Promise<void>) {
+  if (negotiating) { needsRenegotiate = true; return; }
+  negotiating = true;
+  try { await makeOffer(); } finally {
+    negotiating = false;
+    if (needsRenegotiate) { needsRenegotiate = false; safeRenegotiate(makeOffer); }
+  }
+}
+
+
+Glare rollback around setRemoteDescription(offer):
+
+try { await pc.setRemoteDescription(offer); }
+catch (e:any) {
+  if (e.name === "InvalidStateError" && pc.signalingState !== "stable") {
+    await pc.setLocalDescription({ type: "rollback" } as any);
+    await pc.setRemoteDescription(offer);
+  } else throw e;
+}
+
+
+DoD
+
+Simultaneous offer from host/guest succeeds via rollback; stream continues; no stuck signaling states.
+
+6) Screen-share profile (crisp text, stable bitrate)
+
+Implement
+
+On screen share toggle:
+
+Constraints: 1920x1080, frameRate { ideal: 15, max: 24 }, contentHint: "text".
+
+Prefer VP9/AV1 on desktop (not iOS), single high-res layer (no simulcast).
+
+Disable NS/AGC for screen share; OPUS 64–96 kbps.
+
+Quality manager should not auto-upgrade framerate beyond 24 for screen share.
+
+DoD
+
+Screen share shows ~15–24 fps with higher text clarity (resolution maintained; telemetry matches).
+
+7) Candidate & transport stability
+
+Implement
+
+You already stop candidate fan-out after pair locks. Add:
+
+On ICE restart, re-enable candidate forwarding and pause downshifts for 5s.
+
+If selected pair flips relay → srflx/host, allow a gentle upshift after 10s good stats.
+
+DoD
+
+After network change, quality doesn’t thrash for 5s, then recovers smoothly.
+
+8) Small defaults
+
+Implement
+
+videoTrack.contentHint = "motion" for camera; "detail" only for screen share.
+
+Viewer: set HTMLVideoElement.playoutDelayHint = 0.2 (Chromium) if available.
+
+Keep TWCC (transport-cc) required; fail back cleanly if not negotiated.
+
+DoD
+
+Slightly smoother playback under jitter; telemetry still accurate.
+
+9) Validation Runner — add Q9–Q12
+
+Implement
+
+Q9 — Simulcast availability (Chrome): assert multiple encodings / active layer switching during bandwidth change.
+
+Q10 — Frozen-frame recovery: throttle mid-stream → confirm keyframe request unfreezes in ≤1.5s.
+
+Q11 — Screen share: assert ~15–24 fps, higher resolution; record fps/resolution samples.
+
+Q12 — Glare handling: force simultaneous offer (host & guest) → expect rollback path success; stream continuous.
+
+Artifacts
+
+Add PASS/FAIL + ms duration; include selected codec, encodings count, fps trend, and recovery delta for Q10.
+
+Notes
+
+Keep iOS path conservative (H.264 single stream, ≤720p30).
+
+Ensure all changes work with existing TURN, ICE restart, SignalingClient, router.
+
+Definition of Done (overall)
+
+Chrome/Edge uses simulcast (or SVC fallback); iOS uses safe H.264 single layer.
+
+Audio stays clean under stress (FEC/DTX), video adapts without ping-pong.
+
+Keyframe hygiene improves first-frame and frozen-frame recovery.
+
+Glare/renegotiation is robust (rollback works).
+
+Validation Runner: Q9–Q12 PASS in addition to previous H/R/T/G/Q tests.
