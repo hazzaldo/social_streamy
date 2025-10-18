@@ -1,0 +1,67 @@
+Implement Phase 4: co-host request/approval UI and controls.
+
+Goal: Let any viewer request to become Guest; Host can approve/decline; Host can mute/unmute Guest audio, toggle Guest camera, and end co-host session. Viewers see a clean “Request co-host” UI with pending/approved states.
+
+Protocol (extend signaling):
+
+cohost_request { streamId, userId } (viewer → server → host)
+
+cohost_cancel { streamId, userId } (viewer cancels before approval)
+
+cohost_accept { streamId, userId } (host → server → that viewer)
+
+cohost_decline { streamId, userId, reason? } (host → server → that viewer)
+
+cohost_end { streamId, by:"host"|"guest" } (either party ends)
+
+Controls:
+
+cohost_mute { streamId, target:"guest" }
+
+cohost_unmute { streamId, target:"guest" }
+
+cohost_cam_off { streamId, target:"guest" }
+
+cohost_cam_on { streamId, target:"guest" }
+
+Keep current WebRTC flow for guest media; only add UI/UX + control messages.
+
+UI/UX requirements:
+
+Viewer UI: “Request co-host” button → states: Idle → Pending (spinner + “Cancel”) → Accepted (auto start media + connect) → Declined (toast with reason).
+
+Host UI: side panel showing a queue of incoming requests with Approve/Decline buttons; show Guest status + live controls (Mute, Cam Off, End).
+
+Single active guest for now; queue the rest (FIFO). Auto-reject new requests while a guest is active with reason "guest_active".
+
+Add to Test Harness a quick way to simulate: open Host, two Viewers; submit requests; approve/decline; verify controls.
+
+Acceptance criteria (DoD):
+
+A viewer can request, see “Pending,” and receive Approved/Declined.
+
+When Approved, the viewer becomes Guest and media is bidirectional with Host (already implemented) without page reload.
+
+Host can Mute/Unmute guest mic; Cam Off/On guest video; End co-host; all actions reflect in guest UI.
+
+Only one guest at a time; additional requests are queued or auto-declined with "guest_active".
+
+Clear toasts for: approved, declined, ended by host, ended by guest.
+
+Logs follow your format prefixes: Host: / Viewer: / Guest:.
+
+Edge cases:
+
+If guest disconnects, notify host and pop next queued request.
+
+If host disconnects/reloads, auto-end guest and notify them.
+
+Heartbeat/reconnect already exists; preserve it.
+
+Test plan (manual):
+
+Host + Viewer A + Viewer B. A requests → Host approves → A becomes Guest; B requests → queued/declined.
+
+Host mutes Guest → guest mic muted; Host cam-off Guest → guest video track disabled; End co-host → Guest returns to Viewer state.
+
+Guest refreshes tab → host notified; queue advances.
