@@ -1,0 +1,91 @@
+Card A — Staging Deploy & Smoke Validation (paste to Replit)
+
+Deploy to staging + enable smoke checks
+
+Env/config
+
+ALLOWED_ORIGINS=https://<YOUR-STAGING-DOMAIN>
+
+TURN_URL, TURNS_URL, TURN_USERNAME, TURN_CREDENTIAL
+
+ROUTER_ENABLED=true
+
+ALLOW_HARNESS=false (public). Allow /harness?dev=1 only when NODE_ENV!=="production".
+
+ENABLE_AV1=false (keep conservative unless testing desktop-only).
+
+ENABLE_SIMULCAST=true
+
+Readiness gates
+
+Add a /readyz endpoint that returns 200 only when:
+
+WS server is up, TURN creds loaded, router enabled.
+
+Last 1 min: errors_total{code=~"invalid_request|payload_too_large"} rate < threshold (e.g., < 5/min).
+
+Smoke script (Playwright or equivalent)
+
+Host flow:
+
+Open /host/demo → click Go Live.
+
+Assert local preview playing (video.readyState >= 2).
+
+Copy invite link.
+
+Viewer flow:
+
+Open invite /viewer/demo (new context) → assert first frame < 3s.
+
+Click Request co-host → in Host window click Approve.
+
+Assert Guest track appears to Host and Viewer (two remote videos).
+
+Recovery flow:
+
+In Host window, simulate network blip (toggle offline/online or call test hook).
+
+Assert Reconnecting… banner shows ≤ 1.5s, hides after reconnect + new frame decoded.
+
+Metrics assertions:
+
+/metrics shows incremented recovery_success_total{phase="ice"}.
+
+/healthz shows updated selectedCandidatePair summary.
+
+DoD
+
+Smoke passes end-to-end on desktop host + iPhone viewer.
+
+Q13 & Q15 PASS; Q14 (mechanism) PASS in harness.
+
+/readyz returns 200, /metrics & /healthz look healthy.
+
+Card B — (Optional) Deterministic ICE-Restart E2E in Harness (“Peer-Bot”)
+
+Goal: Upgrade Q14 from mechanism check to full offer/answer + candidate flow without refactoring the whole harness.
+
+Mini peer-bot inside harness
+
+Spin a hidden RTCPeerConnection (“bot”) within the same page:
+
+Bot acts as the remote peer for the primary PC.
+
+Wire signaling in-memory (no server): primary.offer → bot.setRemote → bot.createAnswer → primary.setRemote, and relay ICE candidates both ways.
+
+Expose a test hook forceIceRestartE2E() that:
+
+Calls primary.restartIce(), drops candidate relay for 2s, then resumes relay.
+
+Verifies: disconnected → connected, new selected pair, framesDecoded increases.
+
+Update Q14
+
+Replace mechanism-only checks with E2E bot run.
+
+Record timings: time to reconnect, candidate pair IDs before/after, frames delta.
+
+DoD
+
+Q14 now PASS with full handshake; report includes before/after candidate pair and recovery time.
