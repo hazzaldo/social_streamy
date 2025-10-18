@@ -75,6 +75,10 @@ export default function Viewer() {
   // Connection recovery state (tracks retry attempts per connection)
   const recoveryAttempts = useRef<Map<string, number>>(new Map());
   const recoveryTimeouts = useRef<Map<string, NodeJS.Timeout>>(new Map());
+  
+  // ICE candidate logging flags
+  const haveLoggedFirstHostIce = useRef(false);
+  const haveLoggedFirstGuestIce = useRef(false);
 
   // Keep roleRef in sync
   useEffect(() => {
@@ -152,9 +156,13 @@ export default function Viewer() {
         } else if (msg.type === 'ice_candidate' && msg.fromUserId) {
           const pc = roleRef.current === 'guest' ? guestPcRef.current : hostPcRef.current;
           if (pc && msg.candidate) {
-            const candidateCount = pc.getReceivers().length;
-            if (candidateCount === 0) {
+            // Log first ICE candidate once per connection
+            if (msg.fromUserId === 'host' && !haveLoggedFirstHostIce.current) {
+              console.log("[VIEWER] First ICE candidate received from host");
+              haveLoggedFirstHostIce.current = true;
+            } else if (msg.fromUserId !== 'host' && !haveLoggedFirstGuestIce.current) {
               console.log("[VIEWER] First ICE candidate received from", msg.fromUserId);
+              haveLoggedFirstGuestIce.current = true;
             }
             await pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
           }

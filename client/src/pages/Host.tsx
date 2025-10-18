@@ -82,6 +82,9 @@ export default function Host() {
   // Connection recovery state (tracks retry attempts per connection)
   const recoveryAttempts = useRef<Map<string, number>>(new Map());
   const recoveryTimeouts = useRef<Map<string, NodeJS.Timeout>>(new Map());
+  
+  // ICE candidate logging flags (per viewer/guest)
+  const haveLoggedFirstIce = useRef<Map<string, boolean>>(new Map());
 
   // WebSocket setup and reconnection
   useEffect(() => {
@@ -167,9 +170,10 @@ export default function Host() {
         } else if (msg.type === 'ice_candidate' && msg.fromUserId) {
           const pc = viewerPcs.current.get(msg.fromUserId) || guestPcRef.current;
           if (pc && msg.candidate) {
-            const candidateCount = pc.getReceivers().length;
-            if (candidateCount === 0) {
+            // Log first ICE candidate once per connection
+            if (!haveLoggedFirstIce.current.get(msg.fromUserId)) {
               console.log("[HOST] First ICE candidate received from", msg.fromUserId);
+              haveLoggedFirstIce.current.set(msg.fromUserId, true);
             }
             await pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
           }
