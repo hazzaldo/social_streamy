@@ -146,6 +146,20 @@ Participants connect via WebSocket. Three roles supported: Host (broadcaster), G
   - Acknowledgment system for critical operations (join, offers/answers, game events)
   - Client-side SignalingClient utility with retry logic (1s, 2s, 4s delays, max 3 attempts)
   - Session token persistence in sessionStorage for reconnection
+- **Signaling Stress Testing** (Phase 7 validation):
+  - SignalingStress component integrated into TestHarness for demonstrating server optimizations
+  - Test suite validates: message deduplication, ICE flood rate limiting, game event throttling, session resume, message coalescing
+  - Live metrics display from `/metrics` endpoint (Prometheus format)
+  - Room stats visualization from `/healthz` endpoint with participant counts and roles
+  - Protocol-aware WebSocket URLs via shared `wsUrl()` utility for HTTP/HTTPS compatibility
+  - Resume test verifies server's `resume_ok` confirmation, not just client-side attempt
+  - Toast notifications show accurate pass/fail results using fresh state
+- **Safety Rails** (Phase 7 reliability):
+  - Input validation: Required field checks, type validation, length limits (max 100 chars)
+  - Room capacity enforcement: Maximum 100 participants per room
+  - Centralized `sendError()` helper for consistent error response format
+  - Error codes: `invalid_request`, `room_full`, `rate_limited` with descriptive messages
+  - Early rejection of malformed requests before room lookup
 
 ### Feature Specifications
 - **Core Objects & Roles:** User (viewer/creator), Creator (can go live, receive gifts, accept game requests), Session (live video state), Round (timed game segment), Wallet/Coins (in-app currency).
