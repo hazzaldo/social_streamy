@@ -6,12 +6,7 @@ import { Label } from '@/components/ui/label';
 import { Badge } from '@/components/ui/badge';
 import { VideoIcon, WifiIcon, WifiOffIcon, UserIcon, RadioIcon } from 'lucide-react';
 import { SignalingStress } from '@/components/SignalingStress';
-
-function wsUrl(path = '/ws') {
-  const { protocol, host } = window.location;
-  const wsProto = protocol === 'https:' ? 'wss:' : 'ws:';
-  return `${wsProto}//${host}${path}`;
-}
+import { wsUrl } from '@/lib/wsUrl';
 
 type Role = 'host' | 'viewer' | 'guest';
 

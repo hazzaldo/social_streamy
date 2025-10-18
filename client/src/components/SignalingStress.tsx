@@ -4,6 +4,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { useToast } from '@/hooks/use-toast';
 import { SignalingClient } from '@/lib/signaling';
+import { wsUrl } from '@/lib/wsUrl';
 
 interface TestResult {
   name: string;
@@ -23,28 +24,55 @@ interface MetricsData {
   rate_limited_game_event?: number;
 }
 
+interface RoomStats {
+  roomId: string;
+  participants: number;
+  hostPresent: boolean;
+  guestPresent: boolean;
+}
+
+interface HealthData {
+  ok: boolean;
+  timestamp: string;
+  stats: {
+    totalRooms: number;
+    rooms: Array<{
+      streamId: string;
+      totalParticipants: number;
+      roles: {
+        hosts: number;
+        viewers: number;
+        guests: number;
+      };
+      activeGuestId: string | null;
+      cohostQueueSize: number;
+    }>;
+  };
+}
+
 export function SignalingStress() {
   const [tests, setTests] = useState<TestResult[]>([
     { name: 'Duplicate Message Test', status: 'pending' },
     { name: 'ICE Flood Test', status: 'pending' },
     { name: 'Game Spam Test', status: 'pending' },
-    { name: 'Resume Test', status: 'pending' },
-    { name: 'Coalescing Check', status: 'pending' }
+    { name: 'Session Resume Test', status: 'pending' },
+    { name: 'Message Coalescing Test', status: 'pending' }
   ]);
   const [metrics, setMetrics] = useState<MetricsData | null>(null);
+  const [roomStats, setRoomStats] = useState<RoomStats[]>([]);
   const [isRunning, setIsRunning] = useState(false);
   const { toast } = useToast();
 
-  // Fetch metrics every 2 seconds
+  // Fetch metrics and room stats every 2 seconds
   useEffect(() => {
-    const fetchMetrics = async () => {
+    const fetchData = async () => {
       try {
-        const response = await fetch('/metrics');
-        const text = await response.text();
+        // Fetch Prometheus metrics
+        const metricsResponse = await fetch('/metrics');
+        const metricsText = await metricsResponse.text();
         
-        // Parse Prometheus format
         const parsed: any = { timestamp: new Date().toISOString() };
-        const lines = text.split('\n');
+        const lines = metricsText.split('\n');
         for (const line of lines) {
           if (line.startsWith('#') || !line.trim()) continue;
           const parts = line.split(' ');
@@ -54,13 +82,25 @@ export function SignalingStress() {
           }
         }
         setMetrics(parsed);
+
+        // Fetch room stats from /healthz
+        const healthResponse = await fetch('/healthz');
+        const healthData: HealthData = await healthResponse.json();
+        if (healthData.stats?.rooms) {
+          setRoomStats(healthData.stats.rooms.map(r => ({
+            roomId: r.streamId,
+            participants: r.totalParticipants,
+            hostPresent: r.roles.hosts > 0,
+            guestPresent: r.roles.guests > 0
+          })));
+        }
       } catch (error) {
-        console.error('Failed to fetch metrics:', error);
+        console.error('Failed to fetch data:', error);
       }
     };
 
-    fetchMetrics();
-    const interval = setInterval(fetchMetrics, 2000);
+    fetchData();
+    const interval = setInterval(fetchData, 2000);
     return () => clearInterval(interval);
   }, []);
 
@@ -74,12 +114,12 @@ export function SignalingStress() {
     const start = Date.now();
 
     try {
-      const ws = new WebSocket(`wss://${window.location.host}/ws`);
+      const ws = new WebSocket(wsUrl());
       
       await new Promise((resolve, reject) => {
         ws.onopen = resolve;
         ws.onerror = reject;
-        setTimeout(() => reject(new Error('Timeout')), 5000);
+        setTimeout(() => reject(new Error('Connection timeout')), 5000);
       });
 
       // Join stream first
@@ -148,12 +188,12 @@ export function SignalingStress() {
     const start = Date.now();
 
     try {
-      const ws = new WebSocket(`wss://${window.location.host}/ws`);
+      const ws = new WebSocket(wsUrl());
       
       await new Promise((resolve, reject) => {
         ws.onopen = resolve;
         ws.onerror = reject;
-        setTimeout(() => reject(new Error('Timeout')), 5000);
+        setTimeout(() => reject(new Error('Connection timeout')), 5000);
       });
 
       const userId = `stress-${Date.now()}`;
@@ -175,7 +215,7 @@ export function SignalingStress() {
         }
       };
 
-      // Send 500 ICE candidates rapidly
+      // Send 500 ICE candidates rapidly (should hit 50/sec limit)
       for (let i = 0; i < 500; i++) {
         ws.send(JSON.stringify({
           type: 'ice_candidate',
@@ -204,13 +244,13 @@ export function SignalingStress() {
         updateTest(testName, { 
           status: 'pass', 
           duration,
-          message: `${rateLimitErrors} rate limit errors, connection stable ✓`
+          message: `${rateLimitErrors} rate limit errors detected ✓`
         });
       } else {
         updateTest(testName, { 
           status: 'fail',
           duration,
-          message: 'No rate limiting detected'
+          message: 'No rate limiting detected (expected >0 errors)'
         });
       }
     } catch (error: any) {
@@ -228,12 +268,12 @@ export function SignalingStress() {
     const start = Date.now();
 
     try {
-      const ws = new WebSocket(`wss://${window.location.host}/ws`);
+      const ws = new WebSocket(wsUrl());
       
       await new Promise((resolve, reject) => {
         ws.onopen = resolve;
         ws.onerror = reject;
-        setTimeout(() => reject(new Error('Timeout')), 5000);
+        setTimeout(() => reject(new Error('Connection timeout')), 5000);
       });
 
       const userId = `stress-${Date.now()}`;
@@ -255,7 +295,7 @@ export function SignalingStress() {
         }
       };
 
-      // Send 20 game events in 3 seconds (should trigger rate limiting)
+      // Send 20 game events in 3 seconds (limit is 5/sec, should trigger rate limiting)
       for (let i = 0; i < 20; i++) {
         ws.send(JSON.stringify({
           type: 'game_event',
@@ -264,7 +304,7 @@ export function SignalingStress() {
           payload: { text: `caption ${i}` },
           from: userId
         }));
-        await new Promise(resolve => setTimeout(resolve, 150)); // 150ms between events
+        await new Promise(resolve => setTimeout(resolve, 150)); // 150ms = 6.67/sec
       }
 
       // Wait for responses
@@ -278,7 +318,7 @@ export function SignalingStress() {
         updateTest(testName, { 
           status: 'pass', 
           duration,
-          message: `${rateLimitErrors} throttled, rate limiting active ✓`
+          message: `${rateLimitErrors} events throttled (5/sec limit) ✓`
         });
       } else {
         updateTest(testName, { 
@@ -297,19 +337,19 @@ export function SignalingStress() {
   };
 
   const runResumeTest = async (): Promise<void> => {
-    const testName = 'Resume Test';
+    const testName = 'Session Resume Test';
     updateTest(testName, { status: 'running' });
     const start = Date.now();
 
     try {
       // First connection - get session token
       let sessionToken: string | null = null;
-      let ws = new WebSocket(`wss://${window.location.host}/ws`);
+      let ws = new WebSocket(wsUrl());
       
       await new Promise<void>((resolve, reject) => {
         ws.onopen = () => resolve();
         ws.onerror = reject;
-        setTimeout(() => reject(new Error('Timeout')), 5000);
+        setTimeout(() => reject(new Error('Connection timeout')), 5000);
       });
 
       ws.onmessage = (event) => {
@@ -338,12 +378,12 @@ export function SignalingStress() {
       await new Promise(resolve => setTimeout(resolve, 500));
 
       // Reconnect with resume
-      ws = new WebSocket(`wss://${window.location.host}/ws`);
+      ws = new WebSocket(wsUrl());
       
       await new Promise<void>((resolve, reject) => {
         ws.onopen = () => resolve();
         ws.onerror = reject;
-        setTimeout(() => reject(new Error('Timeout')), 5000);
+        setTimeout(() => reject(new Error('Connection timeout')), 5000);
       });
 
       let resumeOk = false;
@@ -361,7 +401,7 @@ export function SignalingStress() {
         roomId: 'stress-test'
       }));
 
-      // Wait for resume confirmation
+      // Wait for resume confirmation from server
       await new Promise(resolve => setTimeout(resolve, 1000));
 
       ws.close();
@@ -372,13 +412,13 @@ export function SignalingStress() {
         updateTest(testName, { 
           status: 'pass', 
           duration,
-          message: 'Session resumed successfully ✓'
+          message: 'Server confirmed session resume ✓'
         });
       } else {
         updateTest(testName, { 
           status: 'fail',
           duration,
-          message: 'Resume failed'
+          message: 'Server did not confirm resume (no resume_ok received)'
         });
       }
     } catch (error: any) {
@@ -391,17 +431,17 @@ export function SignalingStress() {
   };
 
   const runCoalescingTest = async (): Promise<void> => {
-    const testName = 'Coalescing Check';
+    const testName = 'Message Coalescing Test';
     updateTest(testName, { status: 'running' });
     const start = Date.now();
 
     try {
-      const ws = new WebSocket(`wss://${window.location.host}/ws`);
+      const ws = new WebSocket(wsUrl());
       
       await new Promise((resolve, reject) => {
         ws.onopen = resolve;
         ws.onerror = reject;
-        setTimeout(() => reject(new Error('Timeout')), 5000);
+        setTimeout(() => reject(new Error('Connection timeout')), 5000);
       });
 
       const userId = `stress-${Date.now()}`;
@@ -423,7 +463,8 @@ export function SignalingStress() {
         }
       };
 
-      // Send 100 rapid game state updates
+      // Send 100 rapid game state updates (5ms between = 200/sec)
+      // With 33ms coalescing window, expect ~30-40 updates/sec
       for (let i = 0; i < 100; i++) {
         ws.send(JSON.stringify({
           type: 'game_state',
@@ -431,7 +472,7 @@ export function SignalingStress() {
           version: i + 1,
           patch: { counter: i }
         }));
-        await new Promise(resolve => setTimeout(resolve, 5)); // 5ms between updates
+        await new Promise(resolve => setTimeout(resolve, 5));
       }
 
       // Wait for coalesced updates
@@ -441,7 +482,7 @@ export function SignalingStress() {
 
       const duration = Date.now() - start;
       
-      // With 33ms coalescing, we expect roughly 30-40 updates/sec instead of 200/sec
+      // With 33ms coalescing, expect roughly 30-40 updates instead of 100
       if (stateUpdateCount < 50) {
         updateTest(testName, { 
           status: 'pass', 
@@ -452,7 +493,7 @@ export function SignalingStress() {
         updateTest(testName, { 
           status: 'fail',
           duration,
-          message: `${stateUpdateCount} updates (expected < 50)`
+          message: `${stateUpdateCount} updates (expected <50 with 33ms window)`
         });
       }
     } catch (error: any) {
@@ -485,11 +526,18 @@ export function SignalingStress() {
       
       await runCoalescingTest();
 
-      const allPassed = tests.every(t => t.status === 'pass');
-      toast({
-        title: allPassed ? 'All Tests Passed! ✓' : 'Some Tests Failed',
-        description: `Completed ${tests.length} stress tests`,
-        variant: allPassed ? 'default' : 'destructive'
+      // Wait for state to update, then count results
+      await new Promise(resolve => setTimeout(resolve, 100));
+      
+      // Use callback to get fresh state
+      setTests(currentTests => {
+        const passedTests = currentTests.filter(t => t.status === 'pass').length;
+        toast({
+          title: passedTests === currentTests.length ? 'All Tests Passed! ✓' : 'Some Tests Failed',
+          description: `${passedTests}/${currentTests.length} stress tests passed`,
+          variant: passedTests === currentTests.length ? 'default' : 'destructive'
+        });
+        return currentTests;
       });
     } finally {
       setIsRunning(false);
@@ -556,7 +604,7 @@ export function SignalingStress() {
         </CardContent>
       </Card>
 
-      {/* Metrics Display */}
+      {/* Live Metrics */}
       {metrics && (
         <Card>
           <CardHeader>
@@ -582,16 +630,47 @@ export function SignalingStress() {
               </div>
               <div>
                 <div className="text-sm text-muted-foreground">Duplicates</div>
-                <div className="text-2xl font-bold">{metrics.msgs_duplicates || 0}</div>
+                <div className="text-2xl font-bold text-yellow-500">{metrics.msgs_duplicates || 0}</div>
               </div>
               <div>
                 <div className="text-sm text-muted-foreground">ICE Rate Limited</div>
-                <div className="text-2xl font-bold">{metrics.rate_limited_ice_candidate || 0}</div>
+                <div className="text-2xl font-bold text-orange-500">{metrics.rate_limited_ice_candidate || 0}</div>
               </div>
               <div>
                 <div className="text-sm text-muted-foreground">Game Rate Limited</div>
-                <div className="text-2xl font-bold">{metrics.rate_limited_game_event || 0}</div>
+                <div className="text-2xl font-bold text-orange-500">{metrics.rate_limited_game_event || 0}</div>
               </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
+      {/* Room Stats */}
+      {roomStats.length > 0 && (
+        <Card>
+          <CardHeader>
+            <CardTitle>Active Rooms</CardTitle>
+          </CardHeader>
+          <CardContent>
+            <div className="space-y-2">
+              {roomStats.map((room) => (
+                <div key={room.roomId} className="flex items-center justify-between p-3 rounded-md bg-muted">
+                  <div>
+                    <div className="font-mono text-sm">{room.roomId}</div>
+                    <div className="text-xs text-muted-foreground">
+                      {room.participants} participant{room.participants !== 1 ? 's' : ''}
+                    </div>
+                  </div>
+                  <div className="flex gap-2">
+                    {room.hostPresent && (
+                      <Badge variant="default" className="text-xs">Host</Badge>
+                    )}
+                    {room.guestPresent && (
+                      <Badge variant="secondary" className="text-xs">Guest</Badge>
+                    )}
+                  </div>
+                </div>
+              ))}
             </div>
           </CardContent>
         </Card>
