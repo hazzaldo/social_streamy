@@ -27,6 +27,31 @@ export const MEDIA_CONSTRAINTS: MediaStreamConstraints = {
   }
 };
 
+/**
+ * Screen-share optimized constraints: 1080p @ 15-24fps
+ * Optimized for text clarity and presentation
+ * Disables noise suppression and auto gain control (not needed for screen)
+ */
+export const SCREEN_SHARE_CONSTRAINTS: DisplayMediaStreamOptions = {
+  video: {
+    width: { ideal: 1920, max: 1920 },
+    height: { ideal: 1080, max: 1080 },
+    frameRate: { ideal: 24, max: 24 }
+  },
+  audio: false  // Screen audio typically not needed
+};
+
+/**
+ * Set playout delay hint on receiver for low-latency playback
+ * @param receiver RTCRtpReceiver to configure
+ * @param delayHint Target playout delay in seconds (default: 0.2s)
+ */
+export function setPlayoutDelayHint(receiver: RTCRtpReceiver, delayHint: number = 0.2): void {
+  if ('playoutDelayHint' in receiver) {
+    (receiver as any).playoutDelayHint = delayHint;
+  }
+}
+
 // ============================================================================
 // 2. Codec Detection & Preferences
 // ============================================================================
@@ -218,11 +243,17 @@ export function setCodecPreferences(
 export async function addVideoTrackWithSimulcast(
   pc: RTCPeerConnection,
   videoTrack: MediaStreamTrack,
-  stream: MediaStream
+  stream: MediaStream,
+  contentHint: 'motion' | 'detail' | 'text' = 'motion'
 ): Promise<RTCRtpSender> {
   const supportsRid = typeof RTCRtpTransceiver !== "undefined";
   const isChromiumBrowser = isChromium();
   const isIOSBrowser = detectSafariIOS();
+
+  // Set contentHint on track for encoder optimization
+  if ('contentHint' in videoTrack) {
+    (videoTrack as any).contentHint = contentHint;
+  }
 
   // Check for existing video transceiver to reuse (for renegotiation)
   // Look for transceivers with no active sender track (null or stopped)
@@ -299,7 +330,7 @@ export async function addVideoTrackWithSimulcast(
 // 3. Adaptive Bitrate Ladder
 // ============================================================================
 
-export type QualityProfile = 'high' | 'medium' | 'low';
+export type QualityProfile = 'high' | 'medium' | 'low' | 'screen-share';
 
 export interface BitrateProfile {
   maxBitrate: number;
@@ -325,6 +356,11 @@ export const BITRATE_PROFILES: Record<QualityProfile, BitrateProfile> = {
     maxBitrate: 600_000,        // 600 kbps
     maxFramerate: 24,
     scaleResolutionDownBy: 1.5   // More aggressive downscale
+  },
+  'screen-share': {
+    maxBitrate: 3_000_000,      // 3 Mbps for screen detail
+    maxFramerate: 24,            // Lower framerate for presentations
+    scaleResolutionDownBy: 1.0   // Full resolution (1080p)
   }
 };
 
@@ -662,6 +698,13 @@ export class AdaptiveQualityManager {
   private readonly DEGRADE_THRESHOLD = 3;   // 3 ticks (~6s) of degraded
   private readonly UPGRADE_THRESHOLD = 7;   // 7 ticks (~14s) of good (10-15s range)
   private readonly MIN_DWELL_TIME = 8000;   // Min 8s dwell before next change (prevents ping-pong)
+  
+  // Transport stability: pause downshifts after connectivity events
+  private downshiftPausedUntil: number = 0;
+  private readonly DOWNSHIFT_PAUSE_DURATION = 5000;  // 5 seconds
+  
+  // Candidate flip detection: track relay→srflx/host transitions
+  private lastCandidatePairType: string | null = null;
 
   constructor(pc: RTCPeerConnection, initialProfile: QualityProfile = 'high') {
     this.pc = pc;
@@ -691,11 +734,15 @@ export class AdaptiveQualityManager {
       this.state.goodTicks = 0;
 
       // Downshift after 3 consecutive bad ticks (≈6s) with min 8s dwell
+      // Also check if downshifts are paused (transport stability)
       if (
         this.state.degradedTicks >= this.DEGRADE_THRESHOLD &&
-        timeSinceLastChange >= this.MIN_DWELL_TIME
+        timeSinceLastChange >= this.MIN_DWELL_TIME &&
+        now >= this.downshiftPausedUntil
       ) {
         this.downgradeQuality();
+      } else if (now < this.downshiftPausedUntil) {
+        console.log(`⏸️  Downshift paused for transport stability (${Math.ceil((this.downshiftPausedUntil - now) / 1000)}s remaining)`);
       }
     } else if (health === 'good') {
       this.state.goodTicks++;
@@ -815,6 +862,56 @@ export class AdaptiveQualityManager {
    */
   getCurrentProfile(): QualityProfile {
     return this.state.currentProfile;
+  }
+
+  /**
+   * Pause downshifts for transport stability
+   * Call this after ICE restart, connection state changes, or other connectivity events
+   * @param duration Duration in ms (default: 5000ms)
+   */
+  pauseDownshifts(duration: number = this.DOWNSHIFT_PAUSE_DURATION): void {
+    this.downshiftPausedUntil = Date.now() + duration;
+    console.log(`⏸️  Downshifts paused for ${duration / 1000}s (transport stability)`);
+  }
+
+  /**
+   * Detect relay→srflx/host candidate flips for transport observability
+   * Logs when connection switches from TURN (relay) to STUN/direct (srflx/host)
+   * @param stats RTCStatsReport from getStats()
+   */
+  async detectCandidateFlips(): Promise<void> {
+    try {
+      const stats = await this.pc.getStats();
+      
+      for (const report of stats.values()) {
+        if (report.type === 'candidate-pair' && report.state === 'succeeded' && report.nominated) {
+          // Found the active candidate pair
+          const localCandidate = stats.get(report.localCandidateId);
+          const remoteCandidate = stats.get(report.remoteCandidateId);
+          
+          if (!localCandidate || !remoteCandidate) continue;
+          
+          // Determine candidate pair type (relay, srflx, or host)
+          const candidateType = localCandidate.candidateType || remoteCandidate.candidateType;
+          
+          if (this.lastCandidatePairType && this.lastCandidatePairType !== candidateType) {
+            // Candidate flip detected!
+            if (this.lastCandidatePairType === 'relay' && (candidateType === 'srflx' || candidateType === 'host')) {
+              console.log(`🔄 Candidate flip: relay → ${candidateType} (TURN fallback → direct/STUN)`);
+            } else if ((this.lastCandidatePairType === 'srflx' || this.lastCandidatePairType === 'host') && candidateType === 'relay') {
+              console.log(`🔄 Candidate flip: ${this.lastCandidatePairType} → relay (direct/STUN → TURN fallback)`);
+            } else {
+              console.log(`🔄 Candidate flip: ${this.lastCandidatePairType} → ${candidateType}`);
+            }
+          }
+          
+          this.lastCandidatePairType = candidateType;
+          break; // Only one active pair
+        }
+      }
+    } catch (err) {
+      // Silently fail - this is just observability
+    }
   }
 
   /**
@@ -1111,6 +1208,9 @@ export function startHealthMonitoring(
       const health = calculateHealth(currentStats);
       qualityManager.updateHealth(health, currentStats.packetLoss, currentStats.frameRate);
 
+      // Detect relay→srflx/host candidate flips for transport observability
+      await qualityManager.detectCandidateFlips();
+
     } catch (err) {
       console.warn('⚠️  Health monitoring error:', err);
     }
@@ -1231,6 +1331,34 @@ export function checkTWCCSupport(): boolean {
   } catch (err) {
     console.warn('⚠️  Failed to check TWCC support:', err);
     return false;
+  }
+}
+
+/**
+ * Trigger ICE restart to re-enable candidate gathering
+ * Useful when connection degrades or needs recovery
+ * @param pc RTCPeerConnection to restart
+ * @param qualityManager Optional quality manager to pause downshifts during restart
+ */
+export async function restartICE(
+  pc: RTCPeerConnection,
+  qualityManager?: AdaptiveQualityManager
+): Promise<void> {
+  try {
+    console.log('🔄 Restarting ICE candidate gathering');
+    
+    // Pause downshifts for transport stability
+    if (qualityManager) {
+      qualityManager.pauseDownshifts(5000);
+    }
+    
+    // Create offer with iceRestart flag
+    const offer = await pc.createOffer({ iceRestart: true });
+    await pc.setLocalDescription(offer);
+    
+    console.log('✅ ICE restart initiated');
+  } catch (err) {
+    console.error('❌ ICE restart failed:', err);
   }
 }
 

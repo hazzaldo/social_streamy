@@ -5,7 +5,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Badge } from '@/components/ui/badge';
 import { useToast } from '@/hooks/use-toast';
 import { Copy, Video, VideoOff, Mic, MicOff, X } from 'lucide-react';
-import { getPlatformConstraints, initializeQualitySettings, reapplyQualitySettings, requestKeyFrame, setupOptimizedCandidateHandler, addVideoTrackWithSimulcast, enableOpusFecDtx, type AdaptiveQualityManager } from '@/lib/webrtc-quality';
+import { getPlatformConstraints, initializeQualitySettings, reapplyQualitySettings, requestKeyFrame, setupOptimizedCandidateHandler, addVideoTrackWithSimulcast, enableOpusFecDtx, setPlayoutDelayHint, restartICE, type AdaptiveQualityManager } from '@/lib/webrtc-quality';
 
 function wsUrl(path = '/ws') {
   const { protocol, host } = window.location;
@@ -72,6 +72,10 @@ export default function Host() {
   const qualityManagers = useRef<Map<string, AdaptiveQualityManager>>(new Map());
   const monitoringCleanups = useRef<Map<string, () => void>>(new Map());
   const candidateHandlerCleanups = useRef<Map<string, () => void>>(new Map());
+  
+  // Renegotiation queue for glare safety
+  const renegotiationInProgress = useRef(false);
+  const pendingRenegotiation = useRef(false);
 
   // WebSocket setup and reconnection
   useEffect(() => {
@@ -252,9 +256,26 @@ export default function Host() {
     await pc.setLocalDescription(offer);
     
     // Request keyframe for faster first frame on viewer join
+    // Also handle ICE failures with restart
     pc.onconnectionstatechange = () => {
       if (pc.connectionState === 'connected') {
         requestKeyFrame(pc);
+      } else if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+        // Restart ICE on connection failure (re-enables candidate gathering)
+        const qualityManager = qualityManagers.current.get(viewerUserId);
+        restartICE(pc, qualityManager);
+      }
+    };
+    
+    // Monitor ICE connection state for transport stability
+    pc.oniceconnectionstatechange = () => {
+      const qualityManager = qualityManagers.current.get(viewerUserId);
+      
+      if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'failed') {
+        // Pause downshifts for transport stability
+        if (qualityManager) {
+          qualityManager.pauseDownshifts(5000);
+        }
       }
     };
     
@@ -303,11 +324,35 @@ export default function Host() {
         guestVideoRef.current.srcObject = stream;
       }
       
+      // Set playout delay hint for low-latency playback (0.2s)
+      if (event.receiver) {
+        setPlayoutDelayHint(event.receiver, 0.2);
+      }
+      
       // Request keyframe after guest joins for faster first frame
       requestKeyFrame(pc);
       
       // Fan out guest tracks to all viewers
       setTimeout(() => renegotiateAllViewers(), 500);
+    };
+    
+    // Monitor connection state for ICE restart
+    pc.onconnectionstatechange = () => {
+      if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+        const qualityManager = qualityManagers.current.get('guest');
+        restartICE(pc, qualityManager);
+      }
+    };
+    
+    // Monitor ICE connection state for transport stability
+    pc.oniceconnectionstatechange = () => {
+      const qualityManager = qualityManagers.current.get('guest');
+      
+      if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'failed') {
+        if (qualityManager) {
+          qualityManager.pauseDownshifts(5000);
+        }
+      }
     };
     
     pc.onicecandidate = (event) => {
@@ -337,65 +382,108 @@ export default function Host() {
     }));
   }
 
-  async function renegotiateAllViewers() {
-    for (const [viewerUserId, pc] of Array.from(viewerPcs.current.entries())) {
-      try {
-        // Remove all senders and re-add with both host and guest tracks
-        const senders = pc.getSenders();
-        for (const sender of senders) {
-          pc.removeTrack(sender);
-        }
-        
-        // Add host tracks (use simulcast for video)
-        if (localStreamRef.current) {
-          for (const track of localStreamRef.current.getTracks()) {
-            if (track.kind === 'video') {
-              await addVideoTrackWithSimulcast(pc, track, localStreamRef.current);
-            } else {
-              pc.addTrack(track, localStreamRef.current);
+  async function renegotiateAllViewers(retryCount = 0) {
+    // Queue management: prevent concurrent renegotiations
+    if (renegotiationInProgress.current) {
+      console.log('Renegotiation already in progress, queuing this request');
+      pendingRenegotiation.current = true;
+      return;
+    }
+    
+    renegotiationInProgress.current = true;
+    
+    try {
+      for (const [viewerUserId, pc] of Array.from(viewerPcs.current.entries())) {
+        try {
+          // Remove all senders and re-add with both host and guest tracks
+          const senders = pc.getSenders();
+          for (const sender of senders) {
+            pc.removeTrack(sender);
+          }
+          
+          // Add host tracks (use simulcast for video)
+          if (localStreamRef.current) {
+            for (const track of localStreamRef.current.getTracks()) {
+              if (track.kind === 'video') {
+                await addVideoTrackWithSimulcast(pc, track, localStreamRef.current);
+              } else {
+                pc.addTrack(track, localStreamRef.current);
+              }
             }
           }
-        }
-        
-        // Add guest tracks if available (use simulcast for video)
-        if (guestStreamRef.current) {
-          for (const track of guestStreamRef.current.getTracks()) {
-            if (track.kind === 'video') {
-              await addVideoTrackWithSimulcast(pc, track, guestStreamRef.current);
-            } else {
-              pc.addTrack(track, guestStreamRef.current);
+          
+          // Add guest tracks if available (use simulcast for video)
+          if (guestStreamRef.current) {
+            for (const track of guestStreamRef.current.getTracks()) {
+              if (track.kind === 'video') {
+                await addVideoTrackWithSimulcast(pc, track, guestStreamRef.current);
+              } else {
+                pc.addTrack(track, guestStreamRef.current);
+              }
             }
           }
-        }
-        
-        // Reapply quality settings after renegotiation
-        const qualityManager = qualityManagers.current.get(viewerUserId);
-        if (qualityManager) {
-          await reapplyQualitySettings(pc, qualityManager);
-        }
-        
-        const offer = await pc.createOffer();
-        // Enable OPUS FEC/DTX for audio resilience
-        if (offer.sdp) {
-          offer.sdp = enableOpusFecDtx(offer.sdp);
-        }
-        await pc.setLocalDescription(offer);
-        
-        // Request keyframe after renegotiation for faster recovery
-        setTimeout(() => requestKeyFrame(pc), 500);
-        
-        wsRef.current?.send(JSON.stringify({
-          type: 'webrtc_offer',
-          streamId,
-          toUserId: viewerUserId,
-          sdp: offer,
-          metadata: {
-            hostStreamId: localStreamRef.current?.id,
-            guestStreamId: guestStreamRef.current?.id
+          
+          // Reapply quality settings after renegotiation
+          const qualityManager = qualityManagers.current.get(viewerUserId);
+          if (qualityManager) {
+            await reapplyQualitySettings(pc, qualityManager);
           }
-        }));
-      } catch (error) {
-        console.error('Renegotiation error:', error);
+          
+          const offer = await pc.createOffer();
+          // Enable OPUS FEC/DTX for audio resilience
+          if (offer.sdp) {
+            offer.sdp = enableOpusFecDtx(offer.sdp);
+          }
+          
+          try {
+            await pc.setLocalDescription(offer);
+          } catch (error: any) {
+            // Glare handling: rollback on InvalidStateError
+            if (error.name === 'InvalidStateError') {
+              console.warn('Glare detected during renegotiation, rolling back');
+              await pc.setLocalDescription({ type: 'rollback' } as RTCSessionDescriptionInit);
+              
+              // Retry with exponential backoff (max 3 retries)
+              if (retryCount < 3) {
+                const delay = 100 * Math.pow(2, retryCount);
+                console.log(`Retrying renegotiation in ${delay}ms (attempt ${retryCount + 1}/3)`);
+                setTimeout(() => {
+                  renegotiationInProgress.current = false;
+                  renegotiateAllViewers(retryCount + 1);
+                }, delay);
+                return;
+              } else {
+                console.error('Max retries reached for renegotiation');
+                throw error;
+              }
+            }
+            throw error;
+          }
+          
+          // Request keyframe after renegotiation for faster recovery
+          setTimeout(() => requestKeyFrame(pc), 500);
+          
+          wsRef.current?.send(JSON.stringify({
+            type: 'webrtc_offer',
+            streamId,
+            toUserId: viewerUserId,
+            sdp: offer,
+            metadata: {
+              hostStreamId: localStreamRef.current?.id,
+              guestStreamId: guestStreamRef.current?.id
+            }
+          }));
+        } catch (error) {
+          console.error(`Renegotiation error for viewer ${viewerUserId}:`, error);
+        }
+      }
+    } finally {
+      renegotiationInProgress.current = false;
+      
+      // Process pending renegotiation if queued
+      if (pendingRenegotiation.current) {
+        pendingRenegotiation.current = false;
+        setTimeout(() => renegotiateAllViewers(), 100);
       }
     }
   }

@@ -6,7 +6,7 @@ import { Badge } from '@/components/ui/badge';
 import { Input } from '@/components/ui/input';
 import { useToast } from '@/hooks/use-toast';
 import { Volume2, VolumeX } from 'lucide-react';
-import { getPlatformConstraints, initializeQualitySettings, requestKeyFrame, enableOpusFecDtx } from '@/lib/webrtc-quality';
+import { getPlatformConstraints, initializeQualitySettings, requestKeyFrame, enableOpusFecDtx, setPlayoutDelayHint, restartICE, type AdaptiveQualityManager } from '@/lib/webrtc-quality';
 
 function wsUrl(path = '/ws') {
   const { protocol, host } = window.location;
@@ -257,6 +257,11 @@ export default function Viewer() {
       const [stream] = event.streams;
       if (!stream) return;
       
+      // Set playout delay hint for low-latency playback (0.2s)
+      if (event.receiver) {
+        setPlayoutDelayHint(event.receiver, 0.2);
+      }
+      
       // Track unique streams and assign based on explicit stream IDs from metadata
       if (!streamMap.has(stream.id)) {
         streamMap.set(stream.id, stream);
@@ -302,6 +307,20 @@ export default function Viewer() {
           toUserId: 'host',
           candidate: event.candidate
         }));
+      }
+    };
+    
+    // Monitor connection state for ICE restart
+    pc.onconnectionstatechange = () => {
+      if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+        restartICE(pc);
+      }
+    };
+    
+    // Monitor ICE connection state for transport stability
+    pc.oniceconnectionstatechange = () => {
+      if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'failed') {
+        console.log('⚠️  ICE connection degraded, connection may recover automatically');
       }
     };
     
@@ -352,6 +371,11 @@ export default function Viewer() {
           hostVideoRef.current.srcObject = stream;
         }
         
+        // Set playout delay hint for low-latency playback (0.2s)
+        if (event.receiver) {
+          setPlayoutDelayHint(event.receiver, 0.2);
+        }
+        
         // Request keyframe for faster first frame
         requestKeyFrame(pc);
       };
@@ -364,6 +388,20 @@ export default function Viewer() {
             toUserId: 'host',
             candidate: event.candidate
           }));
+        }
+      };
+      
+      // Monitor connection state for ICE restart
+      pc.onconnectionstatechange = () => {
+        if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+          restartICE(pc);
+        }
+      };
+      
+      // Monitor ICE connection state for transport stability
+      pc.oniceconnectionstatechange = () => {
+        if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'failed') {
+          console.log('⚠️  ICE connection degraded, connection may recover automatically');
         }
       };
       
