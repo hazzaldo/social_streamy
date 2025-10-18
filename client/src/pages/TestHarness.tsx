@@ -3035,16 +3035,49 @@ export default function TestHarness() {
                 
                 <div className="space-y-1">
                   {validationReport.scenarios.map((scenario) => (
-                    <div key={scenario.id} className="flex items-center justify-between text-xs p-2 rounded bg-muted">
-                      <div className="flex items-center gap-2">
-                        {scenario.status === 'pass' && <span className="text-green-600">✓</span>}
-                        {scenario.status === 'fail' && <span className="text-red-600">✗</span>}
-                        {scenario.status === 'skipped' && <span className="text-gray-600">−</span>}
-                        <span className="font-mono">{scenario.id}</span>
-                        <span>{scenario.name}</span>
+                    <div key={scenario.id} className="space-y-1">
+                      <div className="flex items-center justify-between text-xs p-2 rounded bg-muted">
+                        <div className="flex items-center gap-2">
+                          {scenario.status === 'pass' && <span className="text-green-600">✓</span>}
+                          {scenario.status === 'fail' && <span className="text-red-600">✗</span>}
+                          {scenario.status === 'skipped' && <span className="text-gray-600">−</span>}
+                          <span className="font-mono">{scenario.id}</span>
+                          <span>{scenario.name}</span>
+                        </div>
+                        {scenario.duration && (
+                          <span className="text-muted-foreground">{scenario.duration}ms</span>
+                        )}
                       </div>
-                      {scenario.duration && (
-                        <span className="text-muted-foreground">{scenario.duration}ms</span>
+                      
+                      {/* Version evolution for game tests */}
+                      {scenario.versionEvolution && scenario.versionEvolution.length > 0 && (
+                        <div className="text-xs pl-6 text-muted-foreground font-mono">
+                          Versions: [{scenario.versionEvolution.join(' → ')}]
+                        </div>
+                      )}
+                      
+                      {/* Last patch for game tests */}
+                      {scenario.lastPatch && (
+                        <div className="text-xs pl-6 text-muted-foreground font-mono">
+                          State: {JSON.stringify(scenario.lastPatch).slice(0, 80)}...
+                        </div>
+                      )}
+                      
+                      {/* Failure logs */}
+                      {scenario.failureLogs && scenario.failureLogs.length > 0 && (
+                        <details className="text-xs pl-6">
+                          <summary 
+                            className="cursor-pointer text-destructive" 
+                            data-testid={`toggle-failure-logs-${scenario.id}`}
+                          >
+                            Last 10 logs
+                          </summary>
+                          <div className="mt-1 space-y-0.5 font-mono text-destructive/80">
+                            {scenario.failureLogs.map((log, idx) => (
+                              <div key={idx}>{log}</div>
+                            ))}
+                          </div>
+                        </details>
                       )}
                     </div>
                   ))}

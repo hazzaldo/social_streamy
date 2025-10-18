@@ -66,10 +66,23 @@ Participants connect via WebSocket. Three roles supported: Host (broadcaster), G
 
 **Validation Runner (Automated Testing - Completed):**
 - One-click validation suite executing automated test scenarios
-- Test scenarios: H1 (Host tracks ≤2s), H2 (Viewer join ≤4s), H3 (Frames received ≤3s), R1 (WS reconnect ≤8s), T1 (TURN usage)
+- Test scenarios:
+  - H1: Host local tracks ready (≤2s)
+  - H2: Viewer join and offer/answer signaling (≤4s)
+  - H3: Video frames received by viewer (≥1 frame within 3s)
+  - H4: Guest upgrade flow - Viewer requests → Host approves → bidirectional media (≤8s)
+  - H5: Guest fan-out - New viewer receives both Host+Guest streams (≤4s)
+  - R1: WebSocket auto-reconnect test (≤8s)
+  - R2: ICE restart recovery after network change (≤12s)
+  - T1: TURN usage verification (when Force TURN enabled)
+  - G1: Game initialization - Host sends game_init, all receive version=1 state
+  - G2: Event-driven state mutation - Game event triggers state version increment
+  - G3: State sync after reconnection - Client receives full state on WS reconnect
+  - G4: Rate limiting - Server throttles rapid game events with game_error
 - Fault injection controls: Force TURN, throttle bitrate, simulate network changes, disable heartbeat
 - Telemetry assertions: Bitrate thresholds, RTT limits, frame counting, TURN detection
-- Pass/fail reporting with duration metrics and downloadable JSON reports
+- Enhanced reporting: Per-test duration metrics, version evolution tracking for game tests, failure logs (last 10 per role)
+- Downloadable JSON reports with complete test artifacts
 - Server endpoints: /validate (retrieve report), /validate/report (submit), /healthz (includes validation summary)
 - CI/CD integration ready via server-side report storage and retrieval
 
