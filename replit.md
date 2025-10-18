@@ -1,7 +1,7 @@
 # Social Streamy
 
 ## Overview
-Social Streamy is a WebRTC-based live streaming platform facilitating real-time video broadcasting from hosts to viewers. It uses peer-to-peer WebRTC connections for video and WebSocket for signaling. The platform features a dark-first UI, inspired by modern streaming services, designed for prolonged viewing. The business vision is to create a social, interactive entertainment platform centered around short 1-to-1 live game sessions and optional public co-streams, with monetization based on content support (coins for gifts, super messages, and tips).
+Social Streamy is a WebRTC-based live streaming platform for real-time video broadcasting. It enables hosts to broadcast to viewers using peer-to-peer WebRTC connections for video and WebSockets for signaling. The platform features a dark-first UI inspired by modern streaming services. The business vision is to create a social, interactive entertainment platform focused on short 1-to-1 live game sessions and optional public co-streams, with monetization through in-app purchases like gifts, super messages, and tips.
 
 ## User Preferences
 Preferred communication style: Simple, everyday language.
@@ -9,7 +9,7 @@ Preferred communication style: Simple, everyday language.
 ## System Architecture
 
 ### UI/UX Decisions
-The application employs a "video-first" design philosophy, drawing inspiration from platforms like Twitch and YouTube Live. Key elements include a dark-first color scheme (deep charcoal with vibrant purple accents), minimal cognitive load, Inter font for UI, and JetBrains Mono for technical data, all within a responsive layout that prioritizes video content.
+The application utilizes a "video-first" design with a dark-first color scheme (deep charcoal with vibrant purple accents), minimal cognitive load, and responsive layout prioritizing video content. It uses Inter font for UI and JetBrains Mono for technical data.
 
 ### Technical Implementations
 **Frontend:**
@@ -28,168 +28,49 @@ The application employs a "video-first" design philosophy, drawing inspiration f
 - **Session Management:** `connect-pg-simple`
 
 **WebRTC Signaling Flow:**
-Participants connect via WebSocket. Three roles supported: Host (broadcaster), Guest (co-host with bidirectional media), and Viewer (receive-only). The server maintains in-memory room state and relays signaling messages (offer, answer, ICE candidates) by `userId`. Special 'host' identifier resolves to actual host userId for Guest-to-Host connections.
+Supports Host (broadcaster), Guest (co-host with bidirectional media), and Viewer (receive-only) roles. The server maintains in-memory room state and relays signaling messages. Features include TURN server configuration for NAT traversal, WebSocket heartbeats for mobile reliability, and extended signaling for co-host management (requests, approvals, media exchange, fan-out to viewers).
 
-**Phase 1.1 (Mobile Reliability - Completed):**
-- TURN server configuration with both TCP (`turn:`) and TLS (`turns:`) endpoints for NAT traversal
-- WebSocket heartbeat: client pings every 25s, server responds with pong to maintain mobile network connections
+**Co-host Management:**
+Manual approval workflow for co-host requests, with Host UI for queue management and guest controls (mute, camera, end session).
 
-**Phase 2 (Guest Role - Completed):**
-- Guest (co-host) role with bidirectional media exchange between Host and Guest
-- Extended signaling protocol: `cohost_request`, `cohost_accept`, `cohost_decline`, `cohost_offer`, `cohost_answer`
-- Host auto-accepts cohost requests
-- Guest sends offer to 'host' identifier, server resolves to actual host userId
+**Game Mechanics:**
+Host-authoritative game state synchronization with server-side tracking, version-based state sync, and rate-limited game message handlers. Client-side Game Panel UI for selection and interaction.
 
-**Phase 3 (Guest Fan-Out - Completed):**
-- Host fans out Guest tracks to all Viewers after receiving Guest media
-- Renegotiation: Host creates updated offers with both Host and Guest tracks for existing viewers
-- Viewers receive and display multiple streams: first stream ID = Host video, second = Guest video
-- UI shows 3 video elements: Local Preview (Host), Host Stream (for Viewers), Guest Stream (for Viewers)
+**Validation Runner:**
+An automated testing suite for WebRTC and signaling flows, including scenarios for track readiness, signaling, video reception, guest upgrade, fan-out, WebSocket reconnects, ICE restart, TURN usage, and game state synchronization. Features fault injection controls, telemetry assertions, and downloadable JSON reports.
 
-**Phase 4 (Co-host Request/Approval UI - Completed):**
-- Manual approval workflow: Viewers request co-host, Host approves/declines from queue
-- Viewer UI: Request button with state machine (idle → pending → accepted/declined), cancel functionality
-- Host UI: Pending request queue with Approve/Decline buttons, active guest controls panel
-- Guest controls: Mute/Unmute audio, Camera On/Off, End Co-host session
-- Single-guest enforcement: Additional requests queued when guest active, auto-declined when queue full
-- Queue management: Server broadcasts queue updates after mutations, cleanup on disconnect/leave
-- Control message relay: cohost_mute, cohost_unmute, cohost_cam_off, cohost_cam_on, cohost_ended
-- State management: roleRef pattern to track live role in WebSocket handlers, avoiding closure capture issues
+**End-User Pages:**
+Minimal, mobile-first UI for public-facing host (`/host/:id`) and viewer (`/viewer/:id`) experiences. Pages include video display, co-host controls, game panels, and robust reconnection logic with toast notifications. Debug information is hidden from end-users.
 
-**Phase 5 (Game Rails - Completed):**
-- Host-authoritative game state synchronization for lightweight interactive games
-- Server-side gameState tracking with version-based state sync (full replace or shallow merge)
-- Game message handlers: game_init, game_event, game_state with rate limiting (5 events/sec, burst 10)
-- Client-side Game Panel UI with game selection, state viewer, and event logging
-- Caption competition initial implementation with round management
-- Automatic state sync on join/reconnect
-
-**Validation Runner (Automated Testing - Completed):**
-- One-click validation suite executing automated test scenarios
-- Test scenarios:
-  - H1: Host local tracks ready (≤2s)
-  - H2: Viewer join and offer/answer signaling (≤4s)
-  - H3: Video frames received by viewer (≥1 frame within 3s)
-  - H4: Guest upgrade flow - Viewer requests → Host approves → bidirectional media (≤8s)
-  - H5: Guest fan-out - New viewer receives both Host+Guest streams (≤4s)
-  - R1: WebSocket auto-reconnect test (≤8s)
-  - R2: ICE restart recovery after network change (≤12s)
-  - T1: TURN usage verification (when Force TURN enabled)
-  - G1: Game initialization - Host sends game_init, all receive version=1 state
-  - G2: Event-driven state mutation - Game event triggers state version increment
-  - G3: State sync after reconnection - Client receives full state on WS reconnect
-  - G4: Rate limiting - Server throttles rapid game events with game_error
-- Fault injection controls: Force TURN, throttle bitrate, simulate network changes, disable heartbeat
-- Telemetry assertions: Bitrate thresholds, RTT limits, frame counting, TURN detection
-- Enhanced reporting: Per-test duration metrics, version evolution tracking for game tests, failure logs (last 10 per role)
-- Downloadable JSON reports with complete test artifacts
-- Server endpoints: /validate (retrieve report), /validate/report (submit), /healthz (includes validation summary)
-- CI/CD integration ready via server-side report storage and retrieval
-
-**End-User Pages (Phase 6 - Completed):**
-- Minimal, mobile-first UI separate from test harness for public-facing host and viewer experiences
-- **Host Page** (`/host/:id`):
-  - Camera preview with local video display
-  - Go Live button to start broadcasting
-  - Copy invite link button to share stream with viewers
-  - Co-host controls: View pending requests, approve/decline, active guest management (mute, camera toggle, end session)
-  - Game panel: Select game, start/next/end round, display current game state
-  - Real-time viewer count display
-  - WebSocket reconnection with exponential backoff
-  - Toast notifications for all events (co-host requests, network status, game updates)
-- **Viewer Page** (`/viewer/:id`):
-  - Stream player with host video and picture-in-picture guest video
-  - Request co-host button with state machine (idle → pending → accepted/declined)
-  - Auto-upgrade to Guest role when approved by host
-  - Local camera preview when in Guest mode
-  - Game input area (contextual based on game phase)
-  - Tap-to-play overlay for autoplay-blocked scenarios
-  - Mute/unmute controls
-  - WebSocket reconnection with state sync
-- **Routing Updates**:
-  - `/host/:id` - Host streaming page
-  - `/viewer/:id` - Viewer watching page
-  - `/harness` - Conditional access via `VITE_ALLOW_HARNESS=true` or dev mode
-  - `/` - Landing page with navigation to all pages
-- **Design Philosophy**: Hide all debug/technical info from end users, keep reliability features (heartbeat, reconnection, TURN) working silently under the hood
-
-**Signaling Server Optimization (Phase 7 - Completed):**
-- Production-ready signaling infrastructure optimized for reliability and scale
-- **Message Schema & Idempotency**:
-  - Message deduplication using LRU cache (100 recent msgIds per socket)
-  - Payload validation with 64KB size limit and type checking
-  - Field sanitization to prevent injection attacks
-- **Rate Limiting**:
-  - Token bucket algorithm for ICE candidates (50/sec, burst 100) and game events (5/sec, burst 10)
-  - Authenticated userId-based keys to prevent spoofing
-  - Rate limit errors returned with `rate_limited` code
-- **Message Coalescing**:
-  - 33ms coalescing window for high-frequency messages (ice_candidate, game_state)
-  - Reduces signaling overhead and prevents message storms
-- **Backpressure Monitoring**:
-  - WebSocket buffer monitoring (warning at 512KB, critical at 1MB)
-  - Selective message dropping for non-critical types under backpressure
-  - Flow control notifications to clients
-- **Session Management**:
-  - Session tokens issued on join_stream with 5-minute lifetime
-  - Resume capability via `resume` message type with session token
-  - Auto-cleanup of expired sessions every 30 seconds
-- **Room Lifecycle**:
-  - Idle room reaper: auto-teardown after 2 minutes without host
-  - Room closed notifications with `room_closed` message type
-  - Proper cleanup of room state, coalescer queues, and rate limiters
-- **Observability**:
-  - Prometheus-compatible `/metrics` endpoint
-  - Metrics for connections, messages (in/out by type), rate limiting, duplicates, processing duration
-  - Enhanced `/healthz` with per-room summaries and validation status
-- **Reliability Features**:
-  - Acknowledgment system for critical operations (join, offers/answers, game events)
-  - Client-side SignalingClient utility with retry logic (1s, 2s, 4s delays, max 3 attempts)
-  - Session token persistence in sessionStorage for reconnection
-- **Signaling Stress Testing** (Phase 7 validation):
-  - SignalingStress component integrated into TestHarness for demonstrating server optimizations
-  - Test suite validates: message deduplication, ICE flood rate limiting, game event throttling, session resume, message coalescing
-  - Live metrics display from `/metrics` endpoint (Prometheus format)
-  - Room stats visualization from `/healthz` endpoint with participant counts and roles
-  - Protocol-aware WebSocket URLs via shared `wsUrl()` utility for HTTP/HTTPS compatibility
-  - Resume test verifies server's `resume_ok` confirmation, not just client-side attempt
-  - Toast notifications show accurate pass/fail results using fresh state
-- **Safety Rails** (Phase 7 reliability):
-  - Input validation: Required field checks, type validation, length limits (max 100 chars)
-  - Room capacity enforcement: Maximum 100 participants per room
-  - Centralized `sendError()` helper for consistent error response format
-  - Error codes: `invalid_request`, `room_full`, `rate_limited` with descriptive messages
-  - Early rejection of malformed requests before room lookup
+**Signaling Server Optimization:**
+Production-ready signaling infrastructure with message deduplication, payload validation, field sanitization, and token bucket rate limiting for ICE candidates and game events. Includes graceful shutdown, CORS allowlist, security headers, and WebSocket origin validation. Critical handlers are migrated to a MessageRouter with schema validation, with rollback capabilities. Features message coalescing, backpressure monitoring, session management with tokens, room lifecycle management, and Prometheus-compatible observability.
 
 ### Feature Specifications
-- **Core Objects & Roles:** User (viewer/creator), Creator (can go live, receive gifts, accept game requests), Session (live video state), Round (timed game segment), Wallet/Coins (in-app currency).
+- **Core Objects & Roles:** User, Creator, Session, Round, Wallet/Coins.
 - **Modes:** OFFLINE, SOLO_PRIVATE, SOLO_PUBLIC, MATCH_PENDING, CO_STREAM_PUBLIC, CO_STREAM_PRIVATE, ROUND_ACTIVE, ROUND_COMPLETE.
-- **Monetization:** In-app coins for gifts, super messages, and game requests. Creators earn from these, with a platform commission.
+- **Monetization:** In-app coins for gifts, super messages, and game requests, with platform commission.
 - **Live Streaming:** Solo (public/private) and Co-Stream capabilities.
-- **Game Mechanics:** Shared engine for all games with pre-game, active round, and round complete phases. Games include "If This Is the Answer…", "Role Roulette", "What Would You Do If…", "2 sentences at a Time Story", "Complete the Headline", "Caption That Pic!", "Mystery Object", "Two Truths and a Lie", "This or That?", "Dream Job Switch", "Dance-Off", "Show Your Talent".
-- **Safety & Moderation:** Community Guidelines, KYC verification for payouts, recording of sessions (public always, private with short retention), report/block tools, profanity filters.
+- **Game Mechanics:** Shared engine for various interactive games.
+- **Safety & Moderation:** Community Guidelines, KYC, session recording, report/block tools, profanity filters.
 
 ### System Design Choices
-- **In-Memory State:** Rooms and participants are stored in `Map` structures for low latency, with the trade-off of no persistence across server restarts.
-- **Direct Message Relay:** The server acts as a simple relay for WebRTC signaling.
-- **Health Endpoints:** Separate `/health` and `/_version` endpoints for monitoring.
-- **Database:** PostgreSQL via Neon serverless driver, managed by Drizzle ORM. User data and session data are persisted, while WebRTC state is ephemeral.
+- **In-Memory State:** Rooms and participants stored in `Map` for low latency (ephemeral state).
+- **Direct Message Relay:** Server acts as a simple relay for WebRTC signaling.
+- **Health Endpoints:** `/health` and `/_version` for monitoring.
+- **Database:** PostgreSQL via Neon serverless driver, managed by Drizzle ORM for persistent user and session data.
 
 ## External Dependencies
 
 ### Third-Party Services
-- **STUN/TURN Servers:** 
-  - STUN: Google's public STUN server (`stun:stun.l.google.com:19302`) for NAT traversal
-  - TURN: `turn:openrelay.metered.ca:80` (TCP) and `turns:openrelay.metered.ca:443` (TLS) with credentials for mobile network fallback
+- **STUN/TURN Servers:** Google's public STUN server (`stun:stun.l.google.com:19302`) and `openrelay.metered.ca` for TURN (`turn:openrelay.metered.ca:80`, `turns:openrelay.metered.ca:443`).
 
 ### Key NPM Packages
-- **WebRTC:** Native browser WebRTC APIs (no external libraries).
-- **WebSocket:** `ws` library for server-side WebSocket handling.
+- **WebRTC:** Native browser WebRTC APIs.
+- **WebSocket:** `ws` library.
 - **UI Framework:** `@radix-ui/*`, `class-variance-authority`, `tailwindcss`.
 - **Database:** `@neondatabase/serverless`, `drizzle-orm`, `drizzle-kit`.
 - **Development:** `@replit/*` plugins, `vite`.
 
 ### API Integration Points
-- **WebSocket Signaling:** `wss://[host]/ws` endpoint.
-- **REST Endpoints:** For health checks and potential future user management.
-- **Authentication:** Schema for user/password exists, but the full authentication flow is not yet implemented.
+- **WebSocket Signaling:** `wss://[host]/ws`.
+- **REST Endpoints:** For health checks.
