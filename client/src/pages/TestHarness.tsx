@@ -1824,6 +1824,22 @@ export default function TestHarness() {
       addValidationLog(`✅ Validation complete: ${overallStatus.toUpperCase()} (${duration}ms)`);
       addValidationLog(`   Passed: ${scenarios.filter(s => s.status === 'pass').length}/${scenarios.length}`);
       
+      // Submit report to server for CI/CD integration
+      try {
+        const reportData = {
+          ...report,
+          stats: Array.from(report.stats.entries()).map(([k, v]) => ({ connection: k, ...v }))
+        };
+        await fetch('/validate/report', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(reportData)
+        });
+        addValidationLog('📤 Report submitted to server');
+      } catch (err) {
+        addValidationLog(`⚠️ Failed to submit report: ${err}`);
+      }
+      
     } catch (error) {
       addValidationLog(`❌ Validation suite failed: ${error}`);
     } finally {

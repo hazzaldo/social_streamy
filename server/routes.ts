@@ -38,6 +38,9 @@ interface RoomState {
 
 const rooms = new Map<string, RoomState>();
 
+// Store latest validation report for /healthz
+let latestValidationReport: any = null;
+
 export async function registerRoutes(app: Express): Promise<Server> {
   // Health endpoints
   app.get('/health', (_req, res) => {
@@ -67,7 +70,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
             active: roomState.gameState.data !== null
           } : null
         }))
-      }
+      },
+      lastValidation: latestValidationReport ? {
+        timestamp: latestValidationReport.timestamp,
+        overallStatus: latestValidationReport.overallStatus,
+        duration: latestValidationReport.duration,
+        passedTests: latestValidationReport.scenarios?.filter((s: any) => s.status === 'pass').length || 0,
+        totalTests: latestValidationReport.scenarios?.length || 0
+      } : null
     };
     res.json(summary);
   });
@@ -77,6 +87,37 @@ export async function registerRoutes(app: Express): Promise<Server> {
       ts: new Date().toISOString(),
       git: process.env.REPL_SLUG || 'local'
     });
+  });
+
+  // Validation endpoint for CI/CD
+  app.post('/validate', (_req, res) => {
+    // Return the latest validation report or trigger a new one
+    if (latestValidationReport) {
+      res.json({
+        ok: true,
+        report: latestValidationReport
+      });
+    } else {
+      res.json({
+        ok: false,
+        message: 'No validation report available. Run validation from the Test Harness UI.'
+      });
+    }
+  });
+
+  // Endpoint to submit validation report from client
+  app.post('/validate/report', (req, res) => {
+    const report = req.body;
+    latestValidationReport = {
+      ...report,
+      receivedAt: new Date().toISOString()
+    };
+    console.log('📊 Validation report received:', {
+      timestamp: report.timestamp,
+      overallStatus: report.overallStatus,
+      duration: report.duration
+    });
+    res.json({ ok: true });
   });
 
   const httpServer = createServer(app);
