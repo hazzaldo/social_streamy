@@ -147,6 +147,7 @@ export default function Host() {
         } else if (msg.type === 'webrtc_answer' && msg.fromUserId) {
           const pc = viewerPcs.current.get(msg.fromUserId);
           if (pc && msg.sdp) {
+            console.log("[HOST] Received webrtc_answer from", msg.fromUserId);
             await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
             
             // Log selected codec after negotiation
@@ -166,9 +167,14 @@ export default function Host() {
         } else if (msg.type === 'ice_candidate' && msg.fromUserId) {
           const pc = viewerPcs.current.get(msg.fromUserId) || guestPcRef.current;
           if (pc && msg.candidate) {
+            const candidateCount = pc.getReceivers().length;
+            if (candidateCount === 0) {
+              console.log("[HOST] First ICE candidate received from", msg.fromUserId);
+            }
             await pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
           }
         } else if (msg.type === 'cohost_request') {
+          console.log("[HOST] Received cohost_request from", msg.fromUserId);
           toast({
             title: 'Co-host Request',
             description: `User ${msg.fromUserId.slice(0, 8)} wants to join`,
@@ -449,6 +455,7 @@ export default function Host() {
       offer.sdp = enableOpusFecDtx(offer.sdp);
     }
     await pc.setLocalDescription(offer);
+    console.log("[HOST] Sending webrtc_offer to", viewerUserId);
     
     // Request keyframe for faster first frame on viewer join
     // Also handle ICE failures with restart

@@ -152,6 +152,10 @@ export default function Viewer() {
         } else if (msg.type === 'ice_candidate' && msg.fromUserId) {
           const pc = roleRef.current === 'guest' ? guestPcRef.current : hostPcRef.current;
           if (pc && msg.candidate) {
+            const candidateCount = pc.getReceivers().length;
+            if (candidateCount === 0) {
+              console.log("[VIEWER] First ICE candidate received from", msg.fromUserId);
+            }
             await pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
           }
         } else if (msg.type === 'cohost_accepted') {
@@ -457,6 +461,9 @@ export default function Viewer() {
       const [stream] = event.streams;
       if (!stream) return;
       
+      // Log track arrival
+      console.log("[VIEWER] ontrack", event.track.kind, stream?.id);
+      
       // Set playout delay hint for low-latency playback (0.2s)
       if (event.receiver) {
         setPlayoutDelayHint(event.receiver, 0.2);
@@ -470,8 +477,23 @@ export default function Viewer() {
         if (metadata?.hostStreamId && stream.id === metadata.hostStreamId && !hostStreamAssigned) {
           if (hostVideoRef.current) {
             hostVideoRef.current.srcObject = stream;
-            hostVideoRef.current.play().catch(() => setAutoplayBlocked(true));
+            hostVideoRef.current.play().catch((err) => {
+              console.warn("[VIEWER] Autoplay blocked:", err);
+              setAutoplayBlocked(true);
+            });
             hostStreamAssigned = true;
+            
+            // 5s keyframe watchdog for video tracks
+            if (event.track.kind === 'video') {
+              setTimeout(() => {
+                if (hostVideoRef.current && hostVideoRef.current.readyState < 2) {
+                  console.warn("[VIEWER] Video not ready after 5s, requesting keyframe");
+                  if (event.receiver && 'requestKeyFrame' in event.receiver) {
+                    (event.receiver as any).requestKeyFrame?.();
+                  }
+                }
+              }, 5000);
+            }
           }
         } else if (metadata?.guestStreamId && stream.id === metadata.guestStreamId && !guestStreamAssigned) {
           if (guestVideoRef.current) {
@@ -528,6 +550,7 @@ export default function Viewer() {
       }
     };
     
+    console.log("[VIEWER] Received webrtc_offer from host");
     await pc.setRemoteDescription(new RTCSessionDescription(sdp));
     const answer = await pc.createAnswer();
     // Enable OPUS FEC/DTX for audio resilience
@@ -535,6 +558,7 @@ export default function Viewer() {
       answer.sdp = enableOpusFecDtx(answer.sdp);
     }
     await pc.setLocalDescription(answer);
+    console.log("[VIEWER] Sending webrtc_answer to host");
     
     // Log selected codec after negotiation
     const transceivers = pc.getTransceivers();
@@ -584,10 +608,29 @@ export default function Viewer() {
       // Receive host tracks
       pc.ontrack = (event) => {
         const [stream] = event.streams;
+        
+        // Log track arrival
+        console.log("[VIEWER] ontrack", event.track.kind, stream?.id);
+        
         if (hostVideoRef.current) {
           hostVideoRef.current.srcObject = stream;
           // Explicit play() call with autoplay fallback
-          hostVideoRef.current.play().catch(() => setAutoplayBlocked(true));
+          hostVideoRef.current.play().catch((err) => {
+            console.warn("[VIEWER] Autoplay blocked:", err);
+            setAutoplayBlocked(true);
+          });
+          
+          // 5s keyframe watchdog for video tracks
+          if (event.track.kind === 'video') {
+            setTimeout(() => {
+              if (hostVideoRef.current && hostVideoRef.current.readyState < 2) {
+                console.warn("[VIEWER] Video not ready after 5s, requesting keyframe");
+                if (event.receiver && 'requestKeyFrame' in event.receiver) {
+                  (event.receiver as any).requestKeyFrame?.();
+                }
+              }
+            }, 5000);
+          }
         }
         
         // Set playout delay hint for low-latency playback (0.2s)
@@ -634,6 +677,7 @@ export default function Viewer() {
         offer.sdp = enableOpusFecDtx(offer.sdp);
       }
       await pc.setLocalDescription(offer);
+      console.log("[VIEWER] Sending cohost_offer to host");
       
       wsRef.current?.send(JSON.stringify({
         type: 'cohost_offer',

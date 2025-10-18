@@ -233,11 +233,8 @@ export function setCodecPreferences(
 }
 
 /**
- * Add video track to peer connection with simulcast/SVC support
- * 
- * Chrome/Edge (non-iOS): Uses simulcast with 3 layers (q/m/h)
- * Chrome/Edge (fallback): Uses SVC L1T3
- * iOS/Safari: Uses single-layer H.264
+ * Add video track to peer connection
+ * TEMPORARY: Simplified single-layer H.264 to debug black video issue
  * 
  * Reuses existing transceivers during renegotiation to avoid SDP bloat
  * 
@@ -252,85 +249,41 @@ export async function addVideoTrackWithSimulcast(
   stream: MediaStream,
   contentHint: 'motion' | 'detail' | 'text' = 'motion'
 ): Promise<RTCRtpSender> {
-  const supportsRid = typeof RTCRtpTransceiver !== "undefined";
-  const isChromiumBrowser = isChromium();
-  const isIOSBrowser = detectSafariIOS();
-
+  // TEMPORARY: Disable simulcast/SVC, use simple single-layer H.264
+  
   // Set contentHint on track for encoder optimization
   if ('contentHint' in videoTrack) {
     (videoTrack as any).contentHint = contentHint;
   }
 
   // Check for existing video transceiver to reuse (for renegotiation)
-  // Look for transceivers with no active sender track (null or stopped)
   const transceivers = pc.getTransceivers();
   const existingVideoTransceiver = transceivers.find(
     t => t.receiver.track?.kind === 'video' && 
          (!t.sender.track || t.sender.track.readyState === 'ended')
   );
 
-  // Chrome/Edge (non-iOS): Simulcast with 3 layers
-  if (supportsRid && isChromiumBrowser && !isIOSBrowser) {
-    try {
-      let transceiver: RTCRtpTransceiver;
-      
-      // Reuse existing transceiver or create new one
-      if (existingVideoTransceiver) {
-        await existingVideoTransceiver.sender.replaceTrack(videoTrack);
-        existingVideoTransceiver.direction = "sendonly";
-        transceiver = existingVideoTransceiver;
-        console.log("✅ Reused existing transceiver for simulcast");
-      } else {
-        transceiver = pc.addTransceiver(videoTrack, {
-          direction: "sendonly",
-          streams: [stream],
-          sendEncodings: [
-            { rid: "q", scaleResolutionDownBy: 2.0, maxBitrate: 350_000 },
-            { rid: "m", scaleResolutionDownBy: 1.5, maxBitrate: 900_000 },
-            { rid: "h", scaleResolutionDownBy: 1.0, maxBitrate: 2_000_000 },
-          ],
-        });
-        console.log("✅ Simulcast enabled with 3 layers (q/m/h)");
-      }
-      
-      console.log("[HOST] tx mid", transceiver.sender?.mid);
-      return transceiver.sender;
-    } catch (err) {
-      console.warn("⚠️  Simulcast failed, falling back to SVC:", err);
-    }
-  }
-
-  // Fallback: Add track normally (reuse existing if possible), then try SVC L1T3 if Chromium
+  let transceiver: RTCRtpTransceiver;
   let sender: RTCRtpSender;
   
   if (existingVideoTransceiver) {
+    // Reuse existing transceiver
     await existingVideoTransceiver.sender.replaceTrack(videoTrack);
     existingVideoTransceiver.direction = "sendonly";
+    transceiver = existingVideoTransceiver;
     sender = existingVideoTransceiver.sender;
-    console.log("✅ Reused existing transceiver for fallback");
+    console.log("✅ Reused existing video transceiver");
   } else {
-    sender = pc.addTrack(videoTrack, stream);
+    // Create new transceiver with sendonly direction
+    transceiver = pc.addTransceiver(videoTrack, {
+      direction: "sendonly",
+      streams: [stream]
+    });
+    sender = transceiver.sender;
+    console.log("✅ Created new video transceiver");
   }
-
-  if (isChromiumBrowser && !isIOSBrowser) {
-    try {
-      const params = sender.getParameters();
-      if (!params.encodings || params.encodings.length === 0) {
-        params.encodings = [{}];
-      }
-      // @ts-ignore - scalabilityMode not in RTCRtpEncodingParameters type yet
-      params.encodings[0].scalabilityMode = "L1T3";
-      params.encodings[0].maxBitrate = 1_500_000;
-      await sender.setParameters(params);
-      console.log("✅ SVC L1T3 enabled as fallback");
-    } catch (err) {
-      console.warn("⚠️  SVC L1T3 failed, using single layer:", err);
-    }
-  } else {
-    console.log("✅ Single-layer video track (iOS/Safari)");
-  }
-
-  console.log("[HOST] tx mid", sender.transceiver?.mid);
+  
+  console.log("[HOST] tx mid", transceiver.mid);
   return sender;
 }
 
