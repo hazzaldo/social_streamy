@@ -16,10 +16,24 @@ interface CohostRequest {
   timestamp: number;
 }
 
+interface GameState {
+  version: number;
+  data: any;
+  gameId: string | null;
+  seed?: number;
+}
+
+interface RateLimitTracker {
+  tokens: number;
+  lastRefill: number;
+}
+
 interface RoomState {
   participants: Map<string, Participant>;
   activeGuestId: string | null;
   cohostQueue: CohostRequest[];
+  gameState: GameState;
+  rateLimits: Map<string, RateLimitTracker>;
 }
 
 const rooms = new Map<string, RoomState>();
@@ -46,7 +60,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
             guests: Array.from(roomState.participants.values()).filter(p => p.role === 'guest').length
           },
           activeGuestId: roomState.activeGuestId,
-          cohostQueueSize: roomState.cohostQueue.length
+          cohostQueueSize: roomState.cohostQueue.length,
+          game: roomState.gameState.gameId ? {
+            gameId: roomState.gameState.gameId,
+            version: roomState.gameState.version,
+            active: roomState.gameState.data !== null
+          } : null
         }))
       }
     };
@@ -113,7 +132,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
             rooms.set(streamId, {
               participants: new Map(),
               activeGuestId: null,
-              cohostQueue: []
+              cohostQueue: [],
+              gameState: { version: 0, data: null, gameId: null },
+              rateLimits: new Map()
             });
             console.log('🆕 Room created:', {
               streamId,
@@ -157,6 +178,24 @@ export async function registerRoutes(app: Express): Promise<Server> {
             streamId,
             count: room.size
           });
+
+          // Phase 5: Send current game state if game is active
+          if (roomState.gameState.gameId) {
+            ws.send(JSON.stringify({
+              type: 'game_state',
+              streamId,
+              version: roomState.gameState.version,
+              full: true,
+              patch: roomState.gameState.data,
+              gameId: roomState.gameState.gameId,
+              seed: roomState.gameState.seed
+            }));
+            console.log('🎮 Sent game state to new participant:', { 
+              userId, 
+              gameId: roomState.gameState.gameId,
+              version: roomState.gameState.version 
+            });
+          }
           break;
         }
 
@@ -582,6 +621,184 @@ export async function registerRoutes(app: Express): Promise<Server> {
             streamId
           });
           console.log('📤 Relayed control to guest:', msg.type);
+          break;
+        }
+
+        case 'game_init': {
+          // Phase 5: Host initializes a game
+          const { streamId, gameId, version, seed } = msg;
+          if (!streamId || !gameId) {
+            ws.send(JSON.stringify({
+              type: 'game_error',
+              streamId,
+              code: 'INVALID_INIT',
+              message: 'Missing streamId or gameId'
+            }));
+            return;
+          }
+
+          const roomState = rooms.get(streamId);
+          if (!roomState) {
+            ws.send(JSON.stringify({
+              type: 'game_error',
+              streamId,
+              code: 'ROOM_NOT_FOUND',
+              message: 'Room not found'
+            }));
+            return;
+          }
+
+          // Verify sender is host
+          const participant = roomState.participants.get(currentParticipant?.userId || '');
+          if (participant?.role !== 'host') {
+            ws.send(JSON.stringify({
+              type: 'game_error',
+              streamId,
+              code: 'NOT_HOST',
+              message: 'Only host can initialize games'
+            }));
+            return;
+          }
+
+          // Initialize game state
+          roomState.gameState = {
+            version: version || 1,
+            gameId,
+            seed: seed || Date.now(),
+            data: null
+          };
+
+          console.log('🎮 Game initialized:', { streamId, gameId, version: roomState.gameState.version });
+
+          // Broadcast to all participants
+          broadcastToRoom(streamId, {
+            type: 'game_init',
+            streamId,
+            gameId,
+            version: roomState.gameState.version,
+            seed: roomState.gameState.seed
+          });
+          break;
+        }
+
+        case 'game_state': {
+          // Phase 5: Host broadcasts game state update
+          const { streamId, version, full, patch } = msg;
+          if (!streamId) {
+            ws.send(JSON.stringify({
+              type: 'game_error',
+              streamId,
+              code: 'INVALID_STATE',
+              message: 'Missing streamId'
+            }));
+            return;
+          }
+
+          const roomState = rooms.get(streamId);
+          if (!roomState) return;
+
+          // Verify sender is host
+          const participant = roomState.participants.get(currentParticipant?.userId || '');
+          if (participant?.role !== 'host') {
+            ws.send(JSON.stringify({
+              type: 'game_error',
+              streamId,
+              code: 'NOT_HOST',
+              message: 'Only host can update game state'
+            }));
+            return;
+          }
+
+          // Update game state
+          if (full) {
+            roomState.gameState.data = patch;
+            roomState.gameState.version = version || (roomState.gameState.version + 1);
+          } else {
+            // Shallow merge patch
+            roomState.gameState.data = { ...roomState.gameState.data, ...patch };
+            roomState.gameState.version = version || (roomState.gameState.version + 1);
+          }
+
+          console.log('🎮 Game state updated:', { 
+            streamId, 
+            version: roomState.gameState.version, 
+            full 
+          });
+
+          // Broadcast to all participants
+          broadcastToRoom(streamId, {
+            type: 'game_state',
+            streamId,
+            version: roomState.gameState.version,
+            full,
+            patch: full ? roomState.gameState.data : patch
+          });
+          break;
+        }
+
+        case 'game_event': {
+          // Phase 5: Guest/Viewer sends game event to host
+          const { streamId, type: eventType, payload, from } = msg;
+          if (!streamId || !eventType) {
+            ws.send(JSON.stringify({
+              type: 'game_error',
+              streamId,
+              code: 'INVALID_EVENT',
+              message: 'Missing streamId or event type'
+            }));
+            return;
+          }
+
+          const roomState = rooms.get(streamId);
+          if (!roomState) return;
+
+          const userId = currentParticipant?.userId || from;
+          if (!userId) return;
+
+          // Rate limiting: 5 events/sec, burst 10
+          const now = Date.now();
+          let tracker = roomState.rateLimits.get(userId);
+          if (!tracker) {
+            tracker = { tokens: 10, lastRefill: now };
+            roomState.rateLimits.set(userId, tracker);
+          }
+
+          // Token bucket refill
+          const elapsed = now - tracker.lastRefill;
+          const refillTokens = Math.floor(elapsed / 200); // 5 per second = 200ms per token
+          if (refillTokens > 0) {
+            tracker.tokens = Math.min(10, tracker.tokens + refillTokens);
+            tracker.lastRefill = now;
+          }
+
+          // Check if event allowed
+          if (tracker.tokens < 1) {
+            ws.send(JSON.stringify({
+              type: 'game_error',
+              streamId,
+              code: 'RATE_LIMIT',
+              message: 'Too many events. Please slow down.'
+            }));
+            console.warn('⚠️ Rate limit exceeded:', userId);
+            return;
+          }
+
+          // Consume token
+          tracker.tokens -= 1;
+
+          console.log('🎮 Game event received:', { streamId, eventType, from: userId });
+
+          // Forward to host for processing
+          const host = Array.from(roomState.participants.values()).find(p => p.role === 'host');
+          if (host && host.ws.readyState === WebSocket.OPEN) {
+            host.ws.send(JSON.stringify({
+              type: 'game_event',
+              streamId,
+              eventType,
+              payload,
+              from: userId
+            }));
+          }
           break;
         }
 

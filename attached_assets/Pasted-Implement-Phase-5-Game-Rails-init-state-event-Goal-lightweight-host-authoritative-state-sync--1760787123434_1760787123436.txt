@@ -1,0 +1,82 @@
+Implement Phase 5: Game Rails (init/state/event).
+
+Goal: lightweight, host-authoritative state sync so Host can run simple games (Don’t Laugh, Caption, etc.) with Guest + Viewers.
+
+Message types (WS):
+
+game_init { streamId, gameId, version, seed } // host → all
+
+game_state { streamId, version, full?: boolean, patch } // host → all (JSON patch or shallow object)
+
+game_event { streamId, type, payload, from } // guest/viewer → host (e.g., reaction, submission)
+
+game_ack { streamId, for:"event"|"state", id } // optional ack
+
+game_error { streamId, code, message }
+
+Rules:
+
+Host is authoritative. Only host sends game_init and game_state.
+
+Guest/Viewer send game_event; host validates and rebroadcasts accepted updates via game_state.
+
+Maintain state.version (monotonic). Ignore stale versions.
+
+On reconnect/join, client requests/receives the latest full state (host sends game_state{full:true}).
+
+Server:
+
+Add per-room gameState { version, data }.
+
+Handle:
+
+game_init: reset state, version=1, broadcast.
+
+game_event: validate (role/size/rate), mutate gameState, increment version, broadcast game_state{patch,...}.
+
+Provide latest state to new connections or on join_stream.
+
+Add basic rate limits per sender (e.g., 5 events/sec burst 10). Return game_error on violation.
+
+Log transitions; include game info in /healthz.
+
+Client (Harness UI):
+
+Add Game Panel:
+
+Dropdown gameId (e.g., caption_comp, image_assoc, dont_laugh).
+
+Host buttons: Start Game, End Game, Next Round.
+
+Guest/Viewer: an input/action area that sends game_event.
+
+Local store: { version, data }. Apply incoming game_state (full replace if full, else shallow merge/patch).
+
+Show a compact state JSON viewer and last 5 events for debugging.
+
+Persist last game state in memory; on WS reconnect, auto-resubscribe and request latest.
+
+Acceptance (DoD):
+
+Host starts “Caption Competition” → viewers/guest see round with prompt + countdown.
+
+Guest submits caption (game_event) → host receives, accepts, rebroadcasts game_state; viewers see it.
+
+Host clicks Next Round → version++ and state updates for all.
+
+Reconnect any role mid-round → client receives full state and continues.
+
+Rate limit kicks in if a client spams events; receives game_error.
+
+Minimal example state shape (caption_comp):
+
+{
+  "round": 1,
+  "prompt": "Photo #3",
+  "submissions": { "guestUserId": "Why did the…"},
+  "timerMs": 30000,
+  "phase": "submit"  // "submit" | "vote" | "results"
+}
+
+
+Keep it simple: shallow merge patches are fine for now.
