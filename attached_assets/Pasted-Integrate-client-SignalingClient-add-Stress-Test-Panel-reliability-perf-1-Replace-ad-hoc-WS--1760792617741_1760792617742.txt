@@ -1,0 +1,73 @@
+Integrate client SignalingClient + add Stress Test Panel (reliability & perf)
+
+1) Replace ad-hoc WS usage with SignalingClient
+
+Wire client/src/lib/signaling.ts into:
+
+Host page
+
+Viewer page
+
+TestHarness
+
+For critical ops (join_stream, webrtc_offer/answer, game_event, cohost_*), use msgId + ack + retry via SignalingClient.
+
+Ensure resume flow on reconnect:
+
+On open: if sessionToken exists → send resume { sessionToken, roomId }; else join_stream.
+
+On resume_ok: restore role/queue position; re-run any needed renegotiations.
+
+Log once per session when backpressure or rate-limit notices are received; surface a small non-intrusive toast.
+
+2) Add “Signaling Stress” panel to Harness
+
+Buttons/tests:
+
+Duplicate Msg Test: send same msgId 5×; expect 1 ack, 4 ignored.
+
+ICE Flood: 500 ice_candidate in 1s; expect rate_limited errors but stable connection.
+
+Game Spam: 20 game_event in 3s; expect throttling + game_error.
+
+Backpressure Demo: enqueue 5MB of non-critical messages; verify server drops non-critical and keeps critical flowing.
+
+Resume Test: kill WS → auto-reconnect + resume_ok, role restored, pending co-host request preserved.
+
+Coalescing Check: send rapid game_state patches; expect ≤ ~30–40 broadcasts/second, not 100+.
+
+Show live /metrics readout (just fetch & render text) and a tiny summary (rooms, clients, msgs_in/out/sec).
+
+3) Perf polish (quick wins)
+
+JSON size trim: for high-freq messages (ice_candidate, game_state), switch to compact keys on the wire (e.g., t for type, c for candidate, v for version) behind a client/server map.
+
+Offer/answer renegotiation guard: ignore offers while one is in flight; queue a single “needsRenegotiate” flag to avoid cascades.
+
+Candidate gathering stop: when selected pair locks, call pc.getSenders().forEach(s => s.transport?.iceTransport?.stop?()) fallback: set an app flag to stop emitting further local candidates.
+
+4) Safety rails
+
+Per-room caps: server rejects joins beyond a configurable MAX_VIEWERS with room_full.
+
+Auth hook stub: accept optional authToken; map to userId; keep guest fallback.
+
+Error normalization: all server rejects: { type:"error", code, message, ref: msgId }.
+
+Definition of Done
+
+Host/Viewer/Harness all use SignalingClient with ack+retry+resume.
+
+Stress panel: all tests report PASS with durations; no page crashes; WS stays connected.
+
+Duplicate/ICE flood/game spam are controlled (metrics show drops/limits; critical messages unaffected).
+
+Resume restores role and co-host queue position without manual action.
+
+/metrics visible in-harness; /healthz shows updated room stats.
+
+Nice-to-have (if time)
+
+Web Worker mode for stress panel (spawn 50–100 lightweight WS clients to one room for 30s).
+
+Export a Perf Report JSON with per-test timings and /metrics snapshots pre/post.
