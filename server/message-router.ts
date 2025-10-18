@@ -118,6 +118,7 @@ export interface MessageContext {
   rooms?: Map<string, any>;
   sessionManager?: any;
   currentParticipant?: any;
+  sessionToken?: any; // Mutable ref for session token propagation
   iceCandidateRateLimiter?: TokenBucketRateLimiter;
   coalescer?: any;
   relayToUser?: (userId: string, message: any) => void;

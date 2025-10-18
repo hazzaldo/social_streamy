@@ -321,12 +321,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
       let handled = false;
       if (ROUTER_ENABLED) {
         try {
-          // Build context for Wave 1 handlers (pass mutable ref wrapper for currentParticipant)
+          // Build context for Wave 1 handlers (pass mutable ref wrappers for state)
           const participantRef = { current: currentParticipant };
+          const sessionTokenRef = { current: sessionToken };
           const routerContext = {
             rooms,
             sessionManager,
             currentParticipant: participantRef,
+            sessionToken: sessionTokenRef,
             iceCandidateRateLimiter,
             coalescer,
             relayToUser,
@@ -335,9 +337,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
           
           handled = await router.route(ws, msg, socketId, routerContext);
           
-          // Update closure variable if handler modified it
+          // Update closure variables if handlers modified them
           if (participantRef.current !== currentParticipant) {
             currentParticipant = participantRef.current;
+          }
+          if (sessionTokenRef.current !== sessionToken) {
+            sessionToken = sessionTokenRef.current;
           }
           
           if (handled) {

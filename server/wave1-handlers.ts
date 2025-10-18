@@ -62,7 +62,7 @@ function sendError(ws: WebSocket, router: any, code: string, message: string, re
  */
 export const handleJoinStream: MessageHandler = async (ws, msg, context) => {
   const { streamId, userId } = msg;
-  const { rooms, sessionManager, broadcastToRoom, currentParticipant: participantRef, metrics } = context;
+  const { rooms, sessionManager, broadcastToRoom, currentParticipant: participantRef, sessionToken: sessionTokenRef, metrics } = context;
   
   if (!rooms || !sessionManager) {
     throw new Error('Missing required context: rooms, sessionManager');
@@ -103,6 +103,11 @@ export const handleJoinStream: MessageHandler = async (ws, msg, context) => {
 
   // Create session token for reconnection
   const sessionToken = sessionManager.createSession(String(userId), streamId, role);
+  
+  // Propagate session token back to connection scope for disconnect cleanup
+  if (sessionTokenRef) {
+    (sessionTokenRef as any).current = sessionToken;
+  }
 
   console.log(`✅ [Wave1] ${role.toUpperCase()} joined stream:`, { 
     streamId, 
@@ -165,7 +170,7 @@ export const handleJoinStream: MessageHandler = async (ws, msg, context) => {
  */
 export const handleResume: MessageHandler = async (ws, msg, context) => {
   const { sessionToken } = msg;
-  const { rooms, sessionManager, currentParticipant: participantRef, metrics } = context;
+  const { rooms, sessionManager, currentParticipant: participantRef, sessionToken: sessionTokenRef, metrics } = context;
   
   if (!rooms || !sessionManager) {
     throw new Error('Missing required context: rooms, sessionManager');
@@ -176,6 +181,11 @@ export const handleResume: MessageHandler = async (ws, msg, context) => {
     sendError(ws, null, 'SESSION_EXPIRED', 'Session token expired or invalid', msg.msgId);
     metrics?.increment('errors_total', { code: 'SESSION_EXPIRED', type: 'resume' });
     return;
+  }
+
+  // Propagate session token back to connection scope for disconnect cleanup
+  if (sessionTokenRef) {
+    (sessionTokenRef as any).current = sessionToken;
   }
 
   // Restore session
