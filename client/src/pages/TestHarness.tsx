@@ -77,6 +77,18 @@ const ICE_CONFIG: RTCConfiguration = {
 
 type CohostRequestState = 'idle' | 'pending' | 'accepted' | 'declined';
 
+type ConnectionStats = {
+  outboundBitrate: number; // kbps
+  inboundBitrate: number; // kbps
+  rtt: number; // ms
+  packetLoss: number; // %
+  frameRate: number;
+  resolution: string;
+  candidateType: string; // host/srflx/relay
+  usingTurn: boolean;
+  timestamp: number;
+};
+
 export default function TestHarness() {
   const [role, setRole] = useState<Role>('host');
   const [streamId, setStreamId] = useState<string>('test-stream');
@@ -92,6 +104,11 @@ export default function TestHarness() {
   // Phase 4: Cohost queue (for Host)
   const [cohostQueue, setCohostQueue] = useState<Array<{ userId: string; timestamp: number }>>([]);
   const [activeGuestId, setActiveGuestId] = useState<string | null>(null);
+
+  // Reliability & Telemetry: Stats tracking
+  const [connectionStats, setConnectionStats] = useState<Map<string, ConnectionStats>>(new Map());
+  const statsIntervalRef = useRef<NodeJS.Timeout | null>(null);
+  const previousBytesRef = useRef<Map<string, { sent: number; received: number; timestamp: number }>>(new Map());
 
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
@@ -929,6 +946,172 @@ export default function TestHarness() {
     return () => connection.removeEventListener('change', handleNetworkChange);
   }, [userId, streamId]);
 
+  // Reliability & Telemetry: Periodic getStats collection (every 2s)
+  async function collectStats(pc: RTCPeerConnection, connectionId: string): Promise<ConnectionStats | null> {
+    try {
+      const stats = await pc.getStats();
+      let outboundBitrate = 0;
+      let inboundBitrate = 0;
+      let rtt = 0;
+      let packetLossSent = 0;
+      let packetLossReceived = 0;
+      let frameRate = 0;
+      let resolution = '';
+      let candidateType = '';
+      let usingTurn = false;
+
+      const now = Date.now();
+      const previousBytes = previousBytesRef.current.get(connectionId);
+
+      stats.forEach((report) => {
+        // Outbound RTP stats
+        if (report.type === 'outbound-rtp' && report.kind === 'video') {
+          if (previousBytes && report.bytesSent) {
+            const bytesSent = report.bytesSent - previousBytes.sent;
+            const timeDiff = (now - previousBytes.timestamp) / 1000; // seconds
+            outboundBitrate = Math.round((bytesSent * 8) / timeDiff / 1000); // kbps
+          }
+          
+          if (report.framesSent && report.framesPerSecond) {
+            frameRate = Math.round(report.framesPerSecond);
+          }
+        }
+
+        // Inbound RTP stats
+        if (report.type === 'inbound-rtp' && report.kind === 'video') {
+          if (previousBytes && report.bytesReceived) {
+            const bytesReceived = report.bytesReceived - previousBytes.received;
+            const timeDiff = (now - previousBytes.timestamp) / 1000;
+            inboundBitrate = Math.round((bytesReceived * 8) / timeDiff / 1000); // kbps
+          }
+
+          if (report.framesPerSecond) {
+            frameRate = Math.round(report.framesPerSecond);
+          }
+
+          if (report.frameWidth && report.frameHeight) {
+            resolution = `${report.frameWidth}x${report.frameHeight}`;
+          }
+
+          // Packet loss calculation
+          if (report.packetsLost && report.packetsReceived) {
+            const totalPackets = report.packetsLost + report.packetsReceived;
+            packetLossReceived = totalPackets > 0 ? (report.packetsLost / totalPackets) * 100 : 0;
+          }
+        }
+
+        // Remote inbound RTP (for RTT and packet loss sent)
+        if (report.type === 'remote-inbound-rtp') {
+          if (report.roundTripTime !== undefined) {
+            rtt = Math.round(report.roundTripTime * 1000); // convert to ms
+          }
+          if (report.packetsLost && report.packetsReceived) {
+            const totalPackets = report.packetsLost + report.packetsReceived;
+            packetLossSent = totalPackets > 0 ? (report.packetsLost / totalPackets) * 100 : 0;
+          }
+        }
+
+        // ICE candidate pair (for connection type)
+        if (report.type === 'candidate-pair' && report.state === 'succeeded') {
+          stats.forEach((localReport) => {
+            if (localReport.id === report.localCandidateId && localReport.type === 'local-candidate') {
+              candidateType = localReport.candidateType || '';
+              usingTurn = localReport.candidateType === 'relay';
+            }
+          });
+        }
+      });
+
+      // Store current bytes for next calculation
+      let totalBytesSent = 0;
+      let totalBytesReceived = 0;
+      stats.forEach((report) => {
+        if (report.type === 'outbound-rtp' && report.bytesSent) {
+          totalBytesSent += report.bytesSent;
+        }
+        if (report.type === 'inbound-rtp' && report.bytesReceived) {
+          totalBytesReceived += report.bytesReceived;
+        }
+      });
+      previousBytesRef.current.set(connectionId, {
+        sent: totalBytesSent,
+        received: totalBytesReceived,
+        timestamp: now
+      });
+
+      return {
+        outboundBitrate,
+        inboundBitrate,
+        rtt,
+        packetLoss: Math.max(packetLossSent, packetLossReceived),
+        frameRate,
+        resolution,
+        candidateType,
+        usingTurn,
+        timestamp: now
+      };
+    } catch (error) {
+      console.error(`Failed to collect stats for ${connectionId}:`, error);
+      return null;
+    }
+  }
+
+  // Start periodic stats collection
+  function startStatsCollection() {
+    if (statsIntervalRef.current) {
+      clearInterval(statsIntervalRef.current);
+    }
+
+    statsIntervalRef.current = setInterval(async () => {
+      const newStats = new Map<string, ConnectionStats>();
+
+      // Collect stats from all active peer connections
+      if (roleRef.current === 'host') {
+        for (const [viewerId, pc] of Array.from(hostPcByViewer.current.entries())) {
+          if (pc.connectionState === 'connected') {
+            const stats = await collectStats(pc, viewerId);
+            if (stats) newStats.set(viewerId, stats);
+          }
+        }
+      }
+
+      if (roleRef.current === 'guest' && guestPcRef.current) {
+        if (guestPcRef.current.connectionState === 'connected') {
+          const stats = await collectStats(guestPcRef.current, 'guest-to-host');
+          if (stats) newStats.set('guest-to-host', stats);
+        }
+      }
+
+      if (roleRef.current === 'viewer' && viewerPcRef.current) {
+        if (viewerPcRef.current.connectionState === 'connected') {
+          const stats = await collectStats(viewerPcRef.current, 'viewer-pc');
+          if (stats) newStats.set('viewer-pc', stats);
+        }
+      }
+
+      setConnectionStats(newStats);
+    }, 2000); // Every 2 seconds
+  }
+
+  // Stop stats collection
+  function stopStatsCollection() {
+    if (statsIntervalRef.current) {
+      clearInterval(statsIntervalRef.current);
+      statsIntervalRef.current = null;
+    }
+  }
+
+  // Start stats collection when WebSocket connects, stop when disconnects
+  useEffect(() => {
+    if (wsConnected) {
+      startStatsCollection();
+    } else {
+      stopStatsCollection();
+    }
+
+    return () => stopStatsCollection();
+  }, [wsConnected]);
+
   // Phase 4: Viewer requests to become cohost
   function requestCohost() {
     if (!wsRef.current || !wsConnected || cohostRequestState !== 'idle') return;
@@ -1363,6 +1546,63 @@ export default function TestHarness() {
             </CardContent>
           </Card>
         </div>
+
+        {/* Connection Telemetry */}
+        {connectionStats.size > 0 && (
+          <Card>
+            <CardHeader>
+              <CardTitle className="text-sm font-mono">Connection Telemetry</CardTitle>
+              <CardDescription className="text-xs">Live stats updated every 2s</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="space-y-4">
+                {Array.from(connectionStats.entries()).map(([connId, stats]) => (
+                  <div key={connId} className="space-y-2 p-3 border rounded-md">
+                    <div className="text-xs font-semibold font-mono text-muted-foreground">
+                      {connId}
+                    </div>
+                    <div className="grid grid-cols-2 gap-2 text-xs font-mono">
+                      <div>
+                        <span className="text-muted-foreground">Out:</span>{' '}
+                        <span className="text-foreground font-semibold">{stats.outboundBitrate} kbps</span>
+                      </div>
+                      <div>
+                        <span className="text-muted-foreground">In:</span>{' '}
+                        <span className="text-foreground font-semibold">{stats.inboundBitrate} kbps</span>
+                      </div>
+                      <div>
+                        <span className="text-muted-foreground">RTT:</span>{' '}
+                        <span className="text-foreground font-semibold">{stats.rtt} ms</span>
+                      </div>
+                      <div>
+                        <span className="text-muted-foreground">Loss:</span>{' '}
+                        <span className="text-foreground font-semibold">{stats.packetLoss.toFixed(2)}%</span>
+                      </div>
+                      <div>
+                        <span className="text-muted-foreground">FPS:</span>{' '}
+                        <span className="text-foreground font-semibold">{stats.frameRate}</span>
+                      </div>
+                      <div>
+                        <span className="text-muted-foreground">Res:</span>{' '}
+                        <span className="text-foreground font-semibold">{stats.resolution || 'N/A'}</span>
+                      </div>
+                      <div>
+                        <span className="text-muted-foreground">Type:</span>{' '}
+                        <span className="text-foreground font-semibold">{stats.candidateType || 'N/A'}</span>
+                      </div>
+                      <div>
+                        <span className="text-muted-foreground">TURN:</span>{' '}
+                        <Badge variant={stats.usingTurn ? 'default' : 'secondary'} className="text-xs h-5">
+                          {stats.usingTurn ? 'Yes' : 'No'}
+                        </Badge>
+                      </div>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </CardContent>
+          </Card>
+        )}
 
         {/* Debug Info */}
         <Card>
