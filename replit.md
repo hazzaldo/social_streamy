@@ -86,6 +86,33 @@ Participants connect via WebSocket. Three roles supported: Host (broadcaster), G
 - Server endpoints: /validate (retrieve report), /validate/report (submit), /healthz (includes validation summary)
 - CI/CD integration ready via server-side report storage and retrieval
 
+**End-User Pages (Phase 6 - Completed):**
+- Minimal, mobile-first UI separate from test harness for public-facing host and viewer experiences
+- **Host Page** (`/host/:id`):
+  - Camera preview with local video display
+  - Go Live button to start broadcasting
+  - Copy invite link button to share stream with viewers
+  - Co-host controls: View pending requests, approve/decline, active guest management (mute, camera toggle, end session)
+  - Game panel: Select game, start/next/end round, display current game state
+  - Real-time viewer count display
+  - WebSocket reconnection with exponential backoff
+  - Toast notifications for all events (co-host requests, network status, game updates)
+- **Viewer Page** (`/viewer/:id`):
+  - Stream player with host video and picture-in-picture guest video
+  - Request co-host button with state machine (idle → pending → accepted/declined)
+  - Auto-upgrade to Guest role when approved by host
+  - Local camera preview when in Guest mode
+  - Game input area (contextual based on game phase)
+  - Tap-to-play overlay for autoplay-blocked scenarios
+  - Mute/unmute controls
+  - WebSocket reconnection with state sync
+- **Routing Updates**:
+  - `/host/:id` - Host streaming page
+  - `/viewer/:id` - Viewer watching page
+  - `/harness` - Conditional access via `VITE_ALLOW_HARNESS=true` or dev mode
+  - `/` - Landing page with navigation to all pages
+- **Design Philosophy**: Hide all debug/technical info from end users, keep reliability features (heartbeat, reconnection, TURN) working silently under the hood
+
 ### Feature Specifications
 - **Core Objects & Roles:** User (viewer/creator), Creator (can go live, receive gifts, accept game requests), Session (live video state), Round (timed game segment), Wallet/Coins (in-app currency).
 - **Modes:** OFFLINE, SOLO_PRIVATE, SOLO_PUBLIC, MATCH_PENDING, CO_STREAM_PUBLIC, CO_STREAM_PRIVATE, ROUND_ACTIVE, ROUND_COMPLETE.

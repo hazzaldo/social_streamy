@@ -137,7 +137,7 @@ export default function Viewer() {
         const msg = JSON.parse(event.data);
         
         if (msg.type === 'webrtc_offer' && msg.fromUserId === 'host') {
-          await handleHostOffer(msg.sdp);
+          await handleHostOffer(msg.sdp, msg.metadata);
         } else if (msg.type === 'ice_candidate' && msg.fromUserId) {
           const pc = roleRef.current === 'guest' ? guestPcRef.current : hostPcRef.current;
           if (pc && msg.candidate) {
@@ -238,7 +238,7 @@ export default function Viewer() {
     };
   }, [isJoined, streamId, userId]);
 
-  async function handleHostOffer(sdp: RTCSessionDescriptionInit) {
+  async function handleHostOffer(sdp: RTCSessionDescriptionInit, metadata?: { hostStreamId?: string; guestStreamId?: string }) {
     // Close existing connection if any
     if (hostPcRef.current) {
       hostPcRef.current.close();
@@ -247,24 +247,47 @@ export default function Viewer() {
     const pc = new RTCPeerConnection(ICE_CONFIG);
     hostPcRef.current = pc;
     
+    const streamMap = new Map<string, MediaStream>();
+    let hostStreamAssigned = false;
+    let guestStreamAssigned = false;
+    
     pc.ontrack = (event) => {
       const [stream] = event.streams;
-      const trackIndex = event.transceiver?.sender.track ? 
-        pc.getTransceivers().findIndex(t => t === event.transceiver) : 
-        -1;
+      if (!stream) return;
       
-      // First stream = host, second stream = guest
-      if (trackIndex < 2) {
-        if (hostVideoRef.current && !hostVideoRef.current.srcObject) {
-          hostVideoRef.current.srcObject = stream;
-          hostVideoRef.current.play().catch(() => setAutoplayBlocked(true));
-        } else if (hostVideoRef.current) {
-          hostVideoRef.current.srcObject = stream;
-        }
-      } else {
-        if (guestVideoRef.current) {
-          guestVideoRef.current.srcObject = stream;
-          guestVideoRef.current.play().catch(() => {});
+      // Track unique streams and assign based on explicit stream IDs from metadata
+      if (!streamMap.has(stream.id)) {
+        streamMap.set(stream.id, stream);
+        
+        // Use metadata to identify streams if available
+        if (metadata?.hostStreamId && stream.id === metadata.hostStreamId && !hostStreamAssigned) {
+          if (hostVideoRef.current) {
+            hostVideoRef.current.srcObject = stream;
+            hostVideoRef.current.play().catch(() => setAutoplayBlocked(true));
+            hostStreamAssigned = true;
+          }
+        } else if (metadata?.guestStreamId && stream.id === metadata.guestStreamId && !guestStreamAssigned) {
+          if (guestVideoRef.current) {
+            guestVideoRef.current.srcObject = stream;
+            guestVideoRef.current.play().catch(() => {});
+            guestStreamAssigned = true;
+          }
+        } else if (!metadata) {
+          // Fallback: if no metadata, assign first stream to host, second to guest
+          const streamIds = Array.from(streamMap.keys());
+          if (streamIds.length === 1 && !hostStreamAssigned) {
+            if (hostVideoRef.current) {
+              hostVideoRef.current.srcObject = stream;
+              hostVideoRef.current.play().catch(() => setAutoplayBlocked(true));
+              hostStreamAssigned = true;
+            }
+          } else if (streamIds.length === 2 && !guestStreamAssigned) {
+            if (guestVideoRef.current) {
+              guestVideoRef.current.srcObject = stream;
+              guestVideoRef.current.play().catch(() => {});
+              guestStreamAssigned = true;
+            }
+          }
         }
       }
     };

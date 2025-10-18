@@ -125,6 +125,9 @@ export default function Host() {
         
         if (msg.type === 'participant_count_update') {
           setViewerCount(msg.count - 1); // Exclude host
+        } else if (msg.type === 'joined_stream' && msg.userId) {
+          // New viewer joined - create peer connection and send offer
+          await createViewerConnection(msg.userId);
         } else if (msg.type === 'webrtc_answer' && msg.fromUserId) {
           const pc = viewerPcs.current.get(msg.fromUserId);
           if (pc && msg.sdp) {
@@ -161,11 +164,11 @@ export default function Host() {
             description: 'The guest has left the stream',
           });
         } else if (msg.type === 'game_state' && msg.version) {
-          setGameState({
+          setGameState(prev => ({
             version: msg.version,
-            data: msg.full ? msg.patch : { ...gameState.data, ...msg.patch },
-            gameId: gameState.gameId
-          });
+            data: msg.full ? msg.patch : { ...prev.data, ...msg.patch },
+            gameId: prev.gameId
+          }));
         }
       };
     }
@@ -184,6 +187,50 @@ export default function Host() {
       }
     };
   }, [isLive, streamId, userId]);
+
+  async function createViewerConnection(viewerUserId: string) {
+    const pc = new RTCPeerConnection(ICE_CONFIG);
+    viewerPcs.current.set(viewerUserId, pc);
+    
+    // Add host tracks
+    if (localStreamRef.current) {
+      localStreamRef.current.getTracks().forEach(track => {
+        pc.addTrack(track, localStreamRef.current!);
+      });
+    }
+    
+    // Add guest tracks if available
+    if (guestStreamRef.current) {
+      guestStreamRef.current.getTracks().forEach(track => {
+        pc.addTrack(track, guestStreamRef.current!);
+      });
+    }
+    
+    pc.onicecandidate = (event) => {
+      if (event.candidate && wsRef.current?.readyState === WebSocket.OPEN) {
+        wsRef.current.send(JSON.stringify({
+          type: 'ice_candidate',
+          streamId,
+          toUserId: viewerUserId,
+          candidate: event.candidate
+        }));
+      }
+    };
+    
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    
+    wsRef.current?.send(JSON.stringify({
+      type: 'webrtc_offer',
+      streamId,
+      toUserId: viewerUserId,
+      sdp: offer,
+      metadata: {
+        hostStreamId: localStreamRef.current?.id,
+        guestStreamId: guestStreamRef.current?.id
+      }
+    }));
+  }
 
   async function handleGuestOffer(guestUserId: string, sdp: RTCSessionDescriptionInit) {
     const pc = new RTCPeerConnection(ICE_CONFIG);
@@ -262,7 +309,11 @@ export default function Host() {
           type: 'webrtc_offer',
           streamId,
           toUserId: viewerUserId,
-          sdp: offer
+          sdp: offer,
+          metadata: {
+            hostStreamId: localStreamRef.current?.id,
+            guestStreamId: guestStreamRef.current?.id
+          }
         }));
       } catch (error) {
         console.error('Renegotiation error:', error);
