@@ -1,0 +1,99 @@
+Network Interruption Auto-Handling Pack + Q13–Q15 Validation
+
+Goals
+
+Seamless recovery from brief drops, NAT rebinding, tab backgrounding, and offline→online events.
+
+One recovery state machine (no dueling loops), deterministic tests.
+
+1) Unified recovery state machine
+
+Centralize WS + ICE recovery into a single controller per role (Host/Viewer/Guest).
+
+States: idle → reconnecting(ws) → restarting_ice(pc) → verifying_media → stable (+ aborted).
+
+Debounce triggers: ignore duplicate recovery requests within 3s window.
+
+Cooldown: do not attempt ICE restart more than 1× per 30s unless WS reconnect occurred.
+
+2) Offline/online handling (mobile-safe)
+
+Use window.addEventListener('offline'/'online') everywhere; do not rely on navigator.connection for iOS.
+
+On offline: pause heartbeat, queue outbound WS messages (critical types only: cohost_*, game_event) with msgId.
+
+On online: flush queue with retries (1s/2s/4s, max 3), drop non-critical if buffer > 64KB.
+
+3) NAT rebinding & path changes
+
+Detect selected candidate pair change (new localCandidateId/remoteCandidateId or selected flip).
+
+When flip detected: pause downshifts for 5s, then allow gentle upgrade if health is Good for 10s.
+
+4) Track & device resiliency
+
+Listen for track.onended and sender.transport.iceTransport.state === "disconnected":
+
+Attempt replaceTrack with the same device id (if still available) before full renegotiation.
+
+If mic/cam device missing, auto-mute that media and surface a toast.
+
+5) Background/visibility guard
+
+On document.visibilitychange → hidden (>15s): lower video maxBitrate to 600 kbps and maxFramerate to 24; restore on visible with safeRenegotiate.
+
+On iOS Safari resume, ensure video.play() promise and unmute overlay flow are retried.
+
+6) UI feedback
+
+Reconnect banner rules:
+
+Show when WS reconnecting OR pc.iceConnectionState ∈ {"disconnected","failed"} for >1.5s.
+
+Hide only after connected and framesDecoded increases since banner shown.
+
+7) Observability
+
+Increment recovery_attempts_total{phase="ws|ice"}, recovery_success_total, offline_queue_dropped_total.
+
+In /healthz, include lastRecoveryAt, lastCandidateFlipAt, offlineQueueSize.
+
+8) Validation: add Q13–Q15 to the runner
+
+Q13 – Setup/Teardown Stability
+
+Start/stop 3 sessions in a row.
+
+Assert no growth in #senders/#receivers/#transceivers or active timers.
+
+Q14 – ICE Restart Recovery
+
+Fault inject: temporarily block ICE candidates (or force pc.restartIce() + mute candidate relay for 2s).
+
+Expect state: disconnected → restarting_ice → connected, framesDecoded increases again, new candidate pair observed.
+
+Q15 – UI Reconnect Feedback
+
+Simulate WS drop for 3–5s.
+
+Banner shows ≤ 1.5s, hides only after connected and a new frame decoded.
+
+DoD
+
+Single recovery loop active at a time; attempts respect 3s debounce & 30s ICE cooldown.
+
+Offline queuing flushes after online; critical messages ack’d; non-critical dropped with metrics.
+
+Candidate flips pause downshift for 5s, then allow upgrade after 10s good health.
+
+Q13–Q15 all PASS; /metrics & /healthz expose new counters/fields.
+
+Phase check (you’re aligned)
+
+✅ Phases 1–5, Reliability pack, Signaling Hardening (Wave 1), End-user UI, Adaptive Quality (Q1–Q12)
+
+✅ Wave 2 quality polish delivered; Wave 3 core recovery implemented
+
+▶️ Now: Wave 3 auto-handling + Q13–Q15 tests (this card)
+
+Next: Staging deploy + smoke tests, or jump to Wave 4 (interaction/latency polish)
