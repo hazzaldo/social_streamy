@@ -69,18 +69,76 @@ export function supportsScalabilityMode(): boolean {
 }
 
 /**
+ * Feature flags for codec selection
+ */
+export const CODEC_FEATURES = {
+  enableAV1: false,  // AV1 disabled by default (limited browser support)
+};
+
+/**
  * Get preferred codec list based on platform
  * iOS/Safari: H.264 only (best compatibility)
- * Other: VP9 preferred, H.264 fallback
+ * Other: VP9 preferred, H.264 fallback, AV1 if enabled
  */
 export function getPreferredCodecs(): string[] {
-  return detectSafariIOS()
-    ? ["video/H264"]
-    : ["video/VP9", "video/H264"];
+  const isIOS = detectSafariIOS();
+  
+  if (isIOS) {
+    return ["video/H264"];
+  }
+  
+  const codecs = ["video/VP9", "video/H264"];
+  if (CODEC_FEATURES.enableAV1) {
+    codecs.unshift("video/AV1");  // Prefer AV1 if enabled
+  }
+  return codecs;
 }
 
 /**
- * Set codec preferences for a peer connection
+ * Rank codec by profile quality score (higher = better)
+ * Returns -1 to reject, 0+ to accept with priority
+ */
+function rankCodecByProfile(codec: RTCRtpCodecCapability): number {
+  const mime = codec.mimeType.toLowerCase();
+  const fmtp = codec.sdpFmtpLine?.toLowerCase() || '';
+  
+  if (mime === 'video/h264') {
+    // Prefer Baseline Profile Level 3.1 (42e01f) - widely compatible
+    // 42 = Baseline, e0 = Constrained, 1f = Level 3.1
+    if (fmtp.includes('profile-level-id=42e01f')) return 100;  // Exact match
+    if (fmtp.includes('profile-level-id=42c01f')) return 90;   // Constrained Baseline 3.1
+    if (fmtp.includes('profile-level-id=4200')) return 80;     // Baseline (any level)
+    if (fmtp.includes('profile-level-id=42e0')) return 70;     // Baseline variants
+    if (fmtp.includes('profile-level-id=42')) return 60;       // Baseline family
+    
+    // Reject High/Main profiles and entries without profile-level-id
+    if (fmtp.includes('profile-level-id=64')) return -1;  // High Profile
+    if (fmtp.includes('profile-level-id=4d')) return -1;  // Main Profile
+    if (!fmtp.includes('profile-level-id')) return -1;    // Ambiguous
+    
+    return 50;  // Other baseline variants
+  }
+  
+  if (mime === 'video/vp9') {
+    // Prefer Profile 0 (8-bit 4:2:0, most compatible)
+    if (fmtp.includes('profile-id=0')) return 100;  // Exact match
+    if (!fmtp.includes('profile-id')) return 80;    // Assume Profile 0 if not specified
+    
+    // Reject Profile 1/2/3 (4:2:2, 4:4:4, 10/12-bit)
+    if (fmtp.includes('profile-id=1')) return -1;
+    if (fmtp.includes('profile-id=2')) return -1;
+    if (fmtp.includes('profile-id=3')) return -1;
+    
+    return 50;
+  }
+  
+  // For AV1 and other codecs, accept all variants
+  return 100;
+}
+
+/**
+ * Set codec preferences for a peer connection with profile hygiene
+ * Prioritizes specific codec profiles (H.264 42e01f, VP9 profile 0)
  * @param pc RTCPeerConnection
  * @param kind "video" or "audio"
  * @param preferredCodecs List of MIME types in preference order
@@ -98,27 +156,43 @@ export function setCodecPreferences(
       if (!capabilities) continue;
 
       const codecs = capabilities.codecs;
-      const sortedCodecs: any[] = [];
+      const sortedCodecs: RTCRtpCodecCapability[] = [];
 
-      // Add preferred codecs first
+      // Add preferred codecs first (with profile ranking for video)
       for (const preferredMime of preferredCodecs) {
-        const matches = codecs.filter(c => 
-          c.mimeType.toLowerCase() === preferredMime.toLowerCase()
-        );
+        const matches = codecs
+          .filter(c => c.mimeType.toLowerCase() === preferredMime.toLowerCase())
+          .map(c => ({ codec: c, rank: kind === 'video' ? rankCodecByProfile(c) : 100 }))
+          .filter(({ rank }) => rank >= 0)  // Reject negative ranks
+          .sort((a, b) => b.rank - a.rank)  // Sort by rank (descending)
+          .map(({ codec }) => codec);
+        
         sortedCodecs.push(...matches);
       }
 
-      // Add remaining codecs
+      // Add remaining codecs (with profile ranking for video)
       for (const codec of codecs) {
-        if (!sortedCodecs.some(c => c.mimeType === codec.mimeType)) {
-          sortedCodecs.push(codec);
+        const alreadyAdded = sortedCodecs.some(c => 
+          c.mimeType === codec.mimeType && 
+          c.sdpFmtpLine === codec.sdpFmtpLine
+        );
+        
+        if (!alreadyAdded) {
+          const rank = kind === 'video' ? rankCodecByProfile(codec) : 100;
+          if (rank >= 0) {  // Only add non-rejected codecs
+            sortedCodecs.push(codec);
+          }
         }
       }
 
       if (sortedCodecs.length > 0 && transceiver.setCodecPreferences) {
         try {
           transceiver.setCodecPreferences(sortedCodecs);
-          console.log(`✅ Codec preferences set for ${kind}:`, sortedCodecs.map(c => c.mimeType));
+          const topCodecs = sortedCodecs.slice(0, 3).map(c => {
+            const fmtp = c.sdpFmtpLine ? ` (${c.sdpFmtpLine.substring(0, 50)})` : '';
+            return `${c.mimeType}${fmtp}`;
+          }).join(', ');
+          console.log(`✅ Codec preferences set for ${kind}: ${topCodecs}`);
         } catch (err) {
           console.warn(`⚠️  Failed to set codec preferences for ${kind}:`, err);
         }
