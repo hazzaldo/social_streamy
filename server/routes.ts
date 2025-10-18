@@ -109,6 +109,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
             viewers: Array.from(roomState.participants.values()).filter(p => p.role === 'viewer').length,
             guests: Array.from(roomState.participants.values()).filter(p => p.role === 'guest').length
           },
+          viewers: Array.from(roomState.participants.values())
+            .filter((p: any) => p.role === 'viewer')
+            .map((p: any) => ({
+              userId: p.userId.substring(0, 8),
+              isIOSSafari: p.isIOSSafari || false,
+              expectedCodec: p.isIOSSafari ? 'H264' : 'VP9'
+            })),
           activeGuestId: roomState.activeGuestId,
           cohostQueueSize: roomState.cohostQueue.length,
           game: roomState.gameState.gameId ? {

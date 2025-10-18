@@ -148,6 +148,20 @@ export default function Host() {
           const pc = viewerPcs.current.get(msg.fromUserId);
           if (pc && msg.sdp) {
             await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
+            
+            // Log selected codec after negotiation
+            const transceivers = pc.getTransceivers();
+            for (const transceiver of transceivers) {
+              if (transceiver.currentDirection && transceiver.receiver.track?.kind === 'video') {
+                const params = transceiver.sender.getParameters();
+                if (params.codecs && params.codecs.length > 0) {
+                  const codec = params.codecs[0].mimeType.split('/')[1];
+                  const viewerPlatform = viewerPlatforms.current.get(msg.fromUserId);
+                  console.log(`✅ Codec selected for viewer ${msg.fromUserId.substring(0, 8)}: ${codec} (isIOSSafari: ${viewerPlatform?.isIOSSafari})`);
+                }
+                break;
+              }
+            }
           }
         } else if (msg.type === 'ice_candidate' && msg.fromUserId) {
           const pc = viewerPcs.current.get(msg.fromUserId) || guestPcRef.current;

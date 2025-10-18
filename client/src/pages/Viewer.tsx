@@ -536,6 +536,19 @@ export default function Viewer() {
     }
     await pc.setLocalDescription(answer);
     
+    // Log selected codec after negotiation
+    const transceivers = pc.getTransceivers();
+    for (const transceiver of transceivers) {
+      if (transceiver.currentDirection && transceiver.receiver.track?.kind === 'video') {
+        const params = transceiver.receiver.getParameters();
+        if (params.codecs && params.codecs.length > 0) {
+          const codec = params.codecs[0].mimeType.split('/')[1];
+          console.log(`✅ Codec received from host: ${codec}`);
+        }
+        break;
+      }
+    }
+    
     wsRef.current?.send(JSON.stringify({
       type: 'webrtc_answer',
       streamId,

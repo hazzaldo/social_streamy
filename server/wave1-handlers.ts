@@ -74,8 +74,8 @@ export const handleJoinStream: MessageHandler = async (ws, msg, context) => {
     (participantRef as any).current = newParticipant;
   }
 
-  // Create session token for reconnection
-  const sessionToken = sessionManager.createSession(String(userId), streamId, role);
+  // Create session token for reconnection (preserve isIOSSafari for resume flows)
+  const sessionToken = sessionManager.createSession(String(userId), streamId, role, isIOSSafari || false);
   
   // Propagate session token back to connection scope for disconnect cleanup
   if (sessionTokenRef) {
@@ -163,8 +163,8 @@ export const handleResume: MessageHandler = async (ws, msg, context) => {
     (sessionTokenRef as any).current = sessionToken;
   }
 
-  // Restore session
-  const { userId, streamId, role, queuePosition } = session;
+  // Restore session (including platform info for codec preference)
+  const { userId, streamId, role, queuePosition, isIOSSafari } = session;
 
   // Check if room still exists
   if (!rooms.has(streamId)) {
@@ -179,8 +179,8 @@ export const handleResume: MessageHandler = async (ws, msg, context) => {
 
   const roomState = rooms.get(streamId)!;
   
-  // Restore participant and update ref
-  const restoredParticipant = { ws, userId, streamId, role: role as any };
+  // Restore participant with platform info and update ref
+  const restoredParticipant = { ws, userId, streamId, role: role as any, isIOSSafari: isIOSSafari || false };
   roomState.participants.set(userId, restoredParticipant);
   if (participantRef) {
     (participantRef as any).current = restoredParticipant;

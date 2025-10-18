@@ -82,17 +82,19 @@ export class SessionManager {
     streamId: string;
     role: 'host' | 'viewer' | 'guest';
     queuePosition?: number;
+    isIOSSafari?: boolean;
     expiresAt: number;
   }> = new Map();
   
   private readonly SESSION_LIFETIME = 5 * 60 * 1000; // 5 minutes
   
-  createSession(userId: string, streamId: string, role: 'host' | 'viewer' | 'guest'): string {
+  createSession(userId: string, streamId: string, role: 'host' | 'viewer' | 'guest', isIOSSafari?: boolean): string {
     const token = `sess_${Date.now()}_${Math.random().toString(36).substring(2, 15)}`;
     this.sessions.set(token, {
       userId,
       streamId,
       role,
+      isIOSSafari,
       expiresAt: Date.now() + this.SESSION_LIFETIME
     });
     return token;
