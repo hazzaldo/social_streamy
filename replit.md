@@ -113,6 +113,40 @@ Participants connect via WebSocket. Three roles supported: Host (broadcaster), G
   - `/` - Landing page with navigation to all pages
 - **Design Philosophy**: Hide all debug/technical info from end users, keep reliability features (heartbeat, reconnection, TURN) working silently under the hood
 
+**Signaling Server Optimization (Phase 7 - Completed):**
+- Production-ready signaling infrastructure optimized for reliability and scale
+- **Message Schema & Idempotency**:
+  - Message deduplication using LRU cache (100 recent msgIds per socket)
+  - Payload validation with 64KB size limit and type checking
+  - Field sanitization to prevent injection attacks
+- **Rate Limiting**:
+  - Token bucket algorithm for ICE candidates (50/sec, burst 100) and game events (5/sec, burst 10)
+  - Authenticated userId-based keys to prevent spoofing
+  - Rate limit errors returned with `rate_limited` code
+- **Message Coalescing**:
+  - 33ms coalescing window for high-frequency messages (ice_candidate, game_state)
+  - Reduces signaling overhead and prevents message storms
+- **Backpressure Monitoring**:
+  - WebSocket buffer monitoring (warning at 512KB, critical at 1MB)
+  - Selective message dropping for non-critical types under backpressure
+  - Flow control notifications to clients
+- **Session Management**:
+  - Session tokens issued on join_stream with 5-minute lifetime
+  - Resume capability via `resume` message type with session token
+  - Auto-cleanup of expired sessions every 30 seconds
+- **Room Lifecycle**:
+  - Idle room reaper: auto-teardown after 2 minutes without host
+  - Room closed notifications with `room_closed` message type
+  - Proper cleanup of room state, coalescer queues, and rate limiters
+- **Observability**:
+  - Prometheus-compatible `/metrics` endpoint
+  - Metrics for connections, messages (in/out by type), rate limiting, duplicates, processing duration
+  - Enhanced `/healthz` with per-room summaries and validation status
+- **Reliability Features**:
+  - Acknowledgment system for critical operations (join, offers/answers, game events)
+  - Client-side SignalingClient utility with retry logic (1s, 2s, 4s delays, max 3 attempts)
+  - Session token persistence in sessionStorage for reconnection
+
 ### Feature Specifications
 - **Core Objects & Roles:** User (viewer/creator), Creator (can go live, receive gifts, accept game requests), Session (live video state), Round (timed game segment), Wallet/Coins (in-app currency).
 - **Modes:** OFFLINE, SOLO_PRIVATE, SOLO_PUBLIC, MATCH_PENDING, CO_STREAM_PUBLIC, CO_STREAM_PRIVATE, ROUND_ACTIVE, ROUND_COMPLETE.
