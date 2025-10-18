@@ -1101,6 +1101,43 @@ export default function TestHarness() {
     }
   }
 
+  // Reliability & Telemetry: Compute connection health from stats
+  function computeConnectionHealth(stats: ConnectionStats): { score: number; label: string; variant: 'default' | 'secondary' | 'destructive' } {
+    let score = 100;
+
+    // Packet loss penalty: -20 points per 1% loss
+    if (stats.packetLoss > 0) {
+      score -= Math.min(stats.packetLoss * 20, 60); // Cap at -60
+    }
+
+    // RTT penalty
+    if (stats.rtt > 300) {
+      score -= 30; // Poor RTT
+    } else if (stats.rtt > 100) {
+      score -= 15; // Fair RTT
+    }
+
+    // Low bitrate penalty (any bitrate under 100 kbps)
+    const totalBitrate = stats.inboundBitrate + stats.outboundBitrate;
+    if (totalBitrate < 100) {
+      score -= 20; // Very low or zero bitrate
+    }
+
+    // Clamp score to 0-100
+    score = Math.max(0, Math.min(100, score));
+
+    // Determine label and variant
+    if (score >= 80) {
+      return { score, label: 'Excellent', variant: 'default' };
+    } else if (score >= 60) {
+      return { score, label: 'Good', variant: 'default' };
+    } else if (score >= 40) {
+      return { score, label: 'Fair', variant: 'secondary' };
+    } else {
+      return { score, label: 'Poor', variant: 'destructive' };
+    }
+  }
+
   // Start stats collection when WebSocket connects, stop when disconnects
   useEffect(() => {
     if (wsConnected) {
@@ -1556,12 +1593,19 @@ export default function TestHarness() {
             </CardHeader>
             <CardContent>
               <div className="space-y-4">
-                {Array.from(connectionStats.entries()).map(([connId, stats]) => (
-                  <div key={connId} className="space-y-2 p-3 border rounded-md">
-                    <div className="text-xs font-semibold font-mono text-muted-foreground">
-                      {connId}
-                    </div>
-                    <div className="grid grid-cols-2 gap-2 text-xs font-mono">
+                {Array.from(connectionStats.entries()).map(([connId, stats]) => {
+                  const health = computeConnectionHealth(stats);
+                  return (
+                    <div key={connId} className="space-y-2 p-3 border rounded-md">
+                      <div className="flex items-center justify-between">
+                        <div className="text-xs font-semibold font-mono text-muted-foreground">
+                          {connId}
+                        </div>
+                        <Badge variant={health.variant} className="text-xs h-5" data-testid={`badge-health-${connId}`}>
+                          {health.label} ({health.score})
+                        </Badge>
+                      </div>
+                      <div className="grid grid-cols-2 gap-2 text-xs font-mono">
                       <div>
                         <span className="text-muted-foreground">Out:</span>{' '}
                         <span className="text-foreground font-semibold">{stats.outboundBitrate} kbps</span>
@@ -1598,7 +1642,8 @@ export default function TestHarness() {
                       </div>
                     </div>
                   </div>
-                ))}
+                  );
+                })}
               </div>
             </CardContent>
           </Card>
