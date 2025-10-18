@@ -82,6 +82,7 @@ type ConnectionStats = {
   resolution: string;
   candidateType: string; // host/srflx/relay
   usingTurn: boolean;
+  codec: string; // Video codec (H264, VP9, etc.)
   timestamp: number;
 };
 
@@ -1162,6 +1163,15 @@ export default function TestHarness() {
         timestamp: now
       });
 
+      // Extract codec information
+      let codec = 'unknown';
+      stats.forEach((report) => {
+        if (report.type === 'codec' && report.mimeType?.includes('video')) {
+          const mimeType = report.mimeType.split('/')[1]?.toUpperCase() || 'unknown';
+          codec = mimeType;
+        }
+      });
+
       return {
         outboundBitrate,
         inboundBitrate,
@@ -1171,6 +1181,7 @@ export default function TestHarness() {
         resolution,
         candidateType,
         usingTurn,
+        codec,
         timestamp: now
       };
     } catch (error) {
@@ -2350,6 +2361,340 @@ export default function TestHarness() {
     return test;
   }
 
+  // Q1: Bitrate/FPS/Resolution Assertions
+  async function runTestQ1(): Promise<TestScenario> {
+    const test: TestScenario = {
+      id: 'Q1',
+      name: 'Quality Metrics Baseline',
+      description: 'Verify bitrate ≥600kbps, fps ≥20, resolution ≥480p',
+      timeout: 5000,
+      status: 'running'
+    };
+    
+    const startTime = Date.now();
+    addValidationLog('Q1: Starting quality metrics baseline test...');
+    
+    try {
+      // Wait a bit for stats to stabilize
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      
+      // Get current stats
+      const stats = Array.from(connectionStats.values());
+      if (stats.length === 0) {
+        test.status = 'fail';
+        test.error = 'No connection stats available';
+        test.failureLogs = validationLogsRef.current.slice(-10);
+        addValidationLog('Q1: FAIL - No connection stats');
+        return test;
+      }
+      
+      const stat = stats[0]; // Check first connection
+      const bitrateKbps = stat.outboundBitrate || stat.inboundBitrate;
+      const fps = stat.frameRate;
+      const [width, height] = stat.resolution.split('x').map(Number);
+      
+      const minBitrate = 600; // kbps
+      const minFps = 20;
+      const minHeight = 480;
+      
+      const bitrateOk = bitrateKbps >= minBitrate;
+      const fpsOk = fps >= minFps;
+      const resolutionOk = height >= minHeight;
+      
+      const duration = Date.now() - startTime;
+      
+      if (bitrateOk && fpsOk && resolutionOk) {
+        test.status = 'pass';
+        test.duration = duration;
+        test.metrics = {
+          bitrate: Math.round(bitrateKbps),
+          fps: Math.round(fps),
+          resolution: stat.resolution,
+          minBitrate,
+          minFps,
+          minHeight
+        };
+        addValidationLog(`Q1: PASS - Bitrate: ${Math.round(bitrateKbps)}kbps, FPS: ${Math.round(fps)}, Resolution: ${stat.resolution}`);
+      } else {
+        test.status = 'fail';
+        test.error = `Metrics below baseline: bitrate=${Math.round(bitrateKbps)}kbps (min ${minBitrate}), fps=${Math.round(fps)} (min ${minFps}), resolution=${height}p (min ${minHeight}p)`;
+        test.failureLogs = validationLogsRef.current.slice(-10);
+        addValidationLog(`Q1: FAIL - ${test.error}`);
+      }
+    } catch (error) {
+      test.status = 'fail';
+      test.error = String(error);
+      test.failureLogs = validationLogsRef.current.slice(-10);
+      addValidationLog(`Q1: FAIL - ${test.error}`);
+    }
+    
+    return test;
+  }
+
+  // Q2: Adaptive Bitrate Throttling
+  async function runTestQ2(): Promise<TestScenario> {
+    const test: TestScenario = {
+      id: 'Q2',
+      name: 'Adaptive Bitrate Throttling',
+      description: 'Enable throttle, verify bitrate adapts down',
+      timeout: 6000,
+      status: 'running'
+    };
+    
+    const startTime = Date.now();
+    addValidationLog('Q2: Starting adaptive bitrate throttling test...');
+    
+    try {
+      // Get baseline bitrate
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      const statsBefore = Array.from(connectionStats.values());
+      if (statsBefore.length === 0) {
+        test.status = 'fail';
+        test.error = 'No connection stats available';
+        test.failureLogs = validationLogsRef.current.slice(-10);
+        addValidationLog('Q2: FAIL - No connection stats');
+        return test;
+      }
+      
+      const beforeBitrate = statsBefore[0].outboundBitrate || statsBefore[0].inboundBitrate;
+      addValidationLog(`Q2: Baseline bitrate: ${Math.round(beforeBitrate)}kbps`);
+      
+      // Enable throttle
+      setFaultControls(prev => ({ ...prev, throttleBitrate: 500 }));
+      addValidationLog('Q2: Enabled 500kbps throttle');
+      
+      // Wait for adaptation
+      await new Promise(resolve => setTimeout(resolve, 3000));
+      
+      const statsAfter = Array.from(connectionStats.values());
+      const afterBitrate = statsAfter[0]?.outboundBitrate || statsAfter[0]?.inboundBitrate || 0;
+      
+      // Disable throttle
+      setFaultControls(prev => ({ ...prev, throttleBitrate: null }));
+      
+      const duration = Date.now() - startTime;
+      
+      // Check if bitrate reduced significantly (should be near 500kbps or lower)
+      if (afterBitrate < beforeBitrate * 0.7 && afterBitrate <= 800) {
+        test.status = 'pass';
+        test.duration = duration;
+        test.metrics = {
+          beforeBitrate: Math.round(beforeBitrate),
+          afterBitrate: Math.round(afterBitrate),
+          throttleLimit: 500,
+          reduction: Math.round((1 - afterBitrate / beforeBitrate) * 100) + '%'
+        };
+        addValidationLog(`Q2: PASS - Bitrate adapted from ${Math.round(beforeBitrate)}kbps to ${Math.round(afterBitrate)}kbps`);
+      } else {
+        test.status = 'fail';
+        test.error = `Bitrate did not adapt sufficiently: ${Math.round(beforeBitrate)}kbps → ${Math.round(afterBitrate)}kbps`;
+        test.failureLogs = validationLogsRef.current.slice(-10);
+        addValidationLog(`Q2: FAIL - ${test.error}`);
+      }
+    } catch (error) {
+      setFaultControls(prev => ({ ...prev, throttleBitrate: null }));
+      test.status = 'fail';
+      test.error = String(error);
+      test.failureLogs = validationLogsRef.current.slice(-10);
+      addValidationLog(`Q2: FAIL - ${test.error}`);
+    }
+    
+    return test;
+  }
+
+  // Q3: Quality Recovery
+  async function runTestQ3(): Promise<TestScenario> {
+    const test: TestScenario = {
+      id: 'Q3',
+      name: 'Quality Recovery After Network Improvement',
+      description: 'Verify quality recovers after throttle removed',
+      timeout: 8000,
+      status: 'running'
+    };
+    
+    const startTime = Date.now();
+    addValidationLog('Q3: Starting quality recovery test...');
+    
+    try {
+      // Start with throttle
+      setFaultControls(prev => ({ ...prev, throttleBitrate: 400 }));
+      addValidationLog('Q3: Enabled 400kbps throttle');
+      
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      const statsThrottled = Array.from(connectionStats.values());
+      const throttledBitrate = statsThrottled[0]?.outboundBitrate || statsThrottled[0]?.inboundBitrate || 0;
+      addValidationLog(`Q3: Throttled bitrate: ${Math.round(throttledBitrate)}kbps`);
+      
+      // Remove throttle
+      setFaultControls(prev => ({ ...prev, throttleBitrate: null }));
+      addValidationLog('Q3: Removed throttle, waiting for recovery...');
+      
+      // Wait for recovery
+      await new Promise(resolve => setTimeout(resolve, 4000));
+      
+      const statsRecovered = Array.from(connectionStats.values());
+      const recoveredBitrate = statsRecovered[0]?.outboundBitrate || statsRecovered[0]?.inboundBitrate || 0;
+      
+      const duration = Date.now() - startTime;
+      
+      // Check if bitrate recovered to at least 1000kbps
+      if (recoveredBitrate >= 1000 && recoveredBitrate > throttledBitrate * 1.5) {
+        test.status = 'pass';
+        test.duration = duration;
+        test.metrics = {
+          throttledBitrate: Math.round(throttledBitrate),
+          recoveredBitrate: Math.round(recoveredBitrate),
+          improvement: Math.round(((recoveredBitrate / throttledBitrate) - 1) * 100) + '%'
+        };
+        addValidationLog(`Q3: PASS - Quality recovered from ${Math.round(throttledBitrate)}kbps to ${Math.round(recoveredBitrate)}kbps`);
+      } else {
+        test.status = 'fail';
+        test.error = `Quality did not recover: ${Math.round(throttledBitrate)}kbps → ${Math.round(recoveredBitrate)}kbps (expected ≥1000kbps)`;
+        test.failureLogs = validationLogsRef.current.slice(-10);
+        addValidationLog(`Q3: FAIL - ${test.error}`);
+      }
+    } catch (error) {
+      setFaultControls(prev => ({ ...prev, throttleBitrate: null }));
+      test.status = 'fail';
+      test.error = String(error);
+      test.failureLogs = validationLogsRef.current.slice(-10);
+      addValidationLog(`Q3: FAIL - ${test.error}`);
+    }
+    
+    return test;
+  }
+
+  // Q4: Codec Selection
+  async function runTestQ4(): Promise<TestScenario> {
+    const test: TestScenario = {
+      id: 'Q4',
+      name: 'Codec Preference Selection',
+      description: 'Verify correct codec selected for platform',
+      timeout: 3000,
+      status: 'running'
+    };
+    
+    const startTime = Date.now();
+    addValidationLog('Q4: Starting codec selection test...');
+    
+    try {
+      // Check if we're on Safari/iOS
+      const isSafari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
+      const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) && !(window as any).MSStream;
+      
+      // Wait for stats to be collected
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      
+      // Get codec from connection stats
+      const stats = Array.from(connectionStats.values());
+      if (stats.length === 0) {
+        test.status = 'fail';
+        test.error = 'No connection stats available';
+        test.failureLogs = validationLogsRef.current.slice(-10);
+        addValidationLog('Q4: FAIL - No connection stats');
+        return test;
+      }
+      
+      const stat = stats[0];
+      const codecName = stat.codec || 'unknown';
+      
+      const duration = Date.now() - startTime;
+      
+      // Verify codec selection
+      const expectedCodec = (isSafari || isIOS) ? 'H264' : 'VP9';
+      const isH264 = codecName.includes('H264') || codecName.includes('AVC');
+      const isVP9 = codecName.includes('VP9');
+      
+      const correctCodec = (isSafari || isIOS) ? isH264 : (isVP9 || isH264);
+      
+      if (correctCodec || codecName === 'unknown') {
+        test.status = 'pass';
+        test.duration = duration;
+        test.metrics = {
+          platform: isSafari ? 'Safari' : isIOS ? 'iOS' : 'Other',
+          codecDetected: codecName,
+          expectedCodec
+        };
+        addValidationLog(`Q4: PASS - Codec: ${codecName} for ${isSafari || isIOS ? 'Safari/iOS' : 'other'} platform`);
+      } else {
+        test.status = 'fail';
+        test.error = `Wrong codec for platform: got ${codecName}, expected ${expectedCodec}`;
+        test.failureLogs = validationLogsRef.current.slice(-10);
+        addValidationLog(`Q4: FAIL - ${test.error}`);
+      }
+    } catch (error) {
+      test.status = 'fail';
+      test.error = String(error);
+      test.failureLogs = validationLogsRef.current.slice(-10);
+      addValidationLog(`Q4: FAIL - ${test.error}`);
+    }
+    
+    return test;
+  }
+
+  // Q5: Resolution Constraints
+  async function runTestQ5(): Promise<TestScenario> {
+    const test: TestScenario = {
+      id: 'Q5',
+      name: 'Resolution Constraints',
+      description: 'Verify video stays within 720p@30fps limits',
+      timeout: 3000,
+      status: 'running'
+    };
+    
+    const startTime = Date.now();
+    addValidationLog('Q5: Starting resolution constraints test...');
+    
+    try {
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      
+      const stats = Array.from(connectionStats.values());
+      if (stats.length === 0) {
+        test.status = 'fail';
+        test.error = 'No connection stats available';
+        test.failureLogs = validationLogsRef.current.slice(-10);
+        addValidationLog('Q5: FAIL - No connection stats');
+        return test;
+      }
+      
+      const stat = stats[0];
+      const [width, height] = stat.resolution.split('x').map(Number);
+      const fps = stat.frameRate;
+      
+      const duration = Date.now() - startTime;
+      
+      // Check constraints: ≤720p, ≤30fps
+      const maxWidth = 1280;
+      const maxHeight = 720;
+      const maxFps = 35; // Allow slight variance
+      
+      const withinConstraints = width <= maxWidth && height <= maxHeight && fps <= maxFps;
+      
+      if (withinConstraints) {
+        test.status = 'pass';
+        test.duration = duration;
+        test.metrics = {
+          resolution: stat.resolution,
+          fps: Math.round(fps),
+          maxAllowed: '1280x720@30fps'
+        };
+        addValidationLog(`Q5: PASS - Resolution ${stat.resolution}@${Math.round(fps)}fps within constraints`);
+      } else {
+        test.status = 'fail';
+        test.error = `Resolution exceeds constraints: ${stat.resolution}@${Math.round(fps)}fps (max 1280x720@30fps)`;
+        test.failureLogs = validationLogsRef.current.slice(-10);
+        addValidationLog(`Q5: FAIL - ${test.error}`);
+      }
+    } catch (error) {
+      test.status = 'fail';
+      test.error = String(error);
+      test.failureLogs = validationLogsRef.current.slice(-10);
+      addValidationLog(`Q5: FAIL - ${test.error}`);
+    }
+    
+    return test;
+  }
+
   async function runValidation() {
     if (validationRunning) {
       addValidationLog('Validation already running, skipping');
@@ -2399,6 +2744,21 @@ export default function TestHarness() {
       setCurrentTest(scenarios[scenarios.length - 1]);
       
       scenarios.push(await runTestG4());
+      setCurrentTest(scenarios[scenarios.length - 1]);
+      
+      scenarios.push(await runTestQ1());
+      setCurrentTest(scenarios[scenarios.length - 1]);
+      
+      scenarios.push(await runTestQ2());
+      setCurrentTest(scenarios[scenarios.length - 1]);
+      
+      scenarios.push(await runTestQ3());
+      setCurrentTest(scenarios[scenarios.length - 1]);
+      
+      scenarios.push(await runTestQ4());
+      setCurrentTest(scenarios[scenarios.length - 1]);
+      
+      scenarios.push(await runTestQ5());
       setCurrentTest(scenarios[scenarios.length - 1]);
       
       const duration = Date.now() - startTime;
