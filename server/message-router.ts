@@ -130,24 +130,24 @@ export class MessageRouter {
     return { valid: true };
   }
 
-  // Validate per-type payload
-  private validatePayload(message: MessageEnvelope): { valid: boolean; error?: string } {
+  // Validate per-type payload (only for router-handled types)
+  private validatePayload(message: MessageEnvelope): { valid: boolean; error?: string; hasSchema: boolean } {
     const schema = MESSAGE_SCHEMAS[message.type];
     
-    // Unknown message types are rejected
+    // Unknown message types - no schema defined (let legacy handle)
     if (!schema) {
-      return { valid: false, error: `Unknown message type: ${message.type}` };
+      return { valid: true, hasSchema: false };
     }
 
     // Check required fields
     for (const field of schema.required) {
       if (!(field in message) || message[field] === null || message[field] === undefined) {
-        return { valid: false, error: `Missing required field: ${field}` };
+        return { valid: false, error: `Missing required field: ${field}`, hasSchema: true };
       }
 
       // Type validation for string fields
       if (typeof message[field] === 'string' && message[field].trim() === '') {
-        return { valid: false, error: `Field ${field} cannot be empty` };
+        return { valid: false, error: `Field ${field} cannot be empty`, hasSchema: true };
       }
     }
 
@@ -155,7 +155,7 @@ export class MessageRouter {
     if (schema.maxLengths) {
       for (const [field, maxLength] of Object.entries(schema.maxLengths)) {
         if (field in message && typeof message[field] === 'string' && message[field].length > maxLength) {
-          return { valid: false, error: `Field ${field} exceeds max length ${maxLength}` };
+          return { valid: false, error: `Field ${field} exceeds max length ${maxLength}`, hasSchema: true };
         }
       }
     }
@@ -164,10 +164,10 @@ export class MessageRouter {
     if (!this.debugSdp && (message.type === 'offer' || message.type === 'answer' || message.type === 'cohost_offer' || message.type === 'cohost_answer')) {
       // Don't log SDP in production
       const sanitized = { ...message, sdp: '[REDACTED]' };
-      return { valid: true };
+      return { valid: true, hasSchema: true };
     }
 
-    return { valid: true };
+    return { valid: true, hasSchema: true };
   }
 
   // Send normalized error
@@ -196,41 +196,29 @@ export class MessageRouter {
     }
   }
 
-  // Route incoming message
-  async route(ws: WebSocket, rawMessage: string, socketId: string) {
+  // Route incoming message (returns true if handled, false if should fall back to legacy)
+  async route(ws: WebSocket, message: MessageEnvelope, socketId: string): Promise<boolean> {
     const startTime = Date.now();
-    let message: MessageEnvelope;
 
-    try {
-      message = JSON.parse(rawMessage);
-    } catch (e) {
-      this.sendError(ws, 'invalid_request', 'Invalid JSON');
-      this.metrics.increment('messages_in_total', { type: 'parse_error' });
-      return;
-    }
-
-    // Validate envelope
-    const envelopeResult = this.validateEnvelope(message);
-    if (!envelopeResult.valid) {
-      this.sendError(ws, 'invalid_request', envelopeResult.error!, message.msgId);
-      this.metrics.increment('messages_in_total', { type: 'invalid_envelope' });
-      return;
-    }
-
-    this.metrics.increment('messages_in_total', { type: message.type });
-
-    // Validate payload
+    // Validate payload (check if we have a schema for this type)
     const payloadResult = this.validatePayload(message);
+    
+    // No schema defined - let legacy handle it
+    if (!payloadResult.hasSchema) {
+      return false;
+    }
+    
+    // Schema exists but validation failed - reject
     if (!payloadResult.valid) {
       this.sendError(ws, 'invalid_request', payloadResult.error!, message.msgId);
-      return;
+      return true; // Handled (rejected)
     }
 
     // Find handler
     const handler = this.handlers.get(message.type);
     if (!handler) {
-      this.sendError(ws, 'invalid_request', `No handler for message type: ${message.type}`, message.msgId);
-      return;
+      // Schema exists but no handler registered yet - let legacy handle it
+      return false;
     }
 
     // Execute handler
@@ -245,10 +233,12 @@ export class MessageRouter {
       // Track processing time
       const duration = Date.now() - startTime;
       this.metrics.recordValue('message_processing_duration', duration, { type: message.type });
+      return true; // Handled successfully
     } catch (error) {
       console.error(`[Router] Handler error for ${message.type}:`, error);
       this.sendError(ws, 'internal_error', 'Internal server error', message.msgId);
       this.metrics.increment('errors_total', { code: 'internal_error' });
+      return true; // Handled (with error)
     }
   }
 }

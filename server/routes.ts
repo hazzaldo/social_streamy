@@ -11,6 +11,9 @@ import {
   BackpressureMonitor,
   PayloadValidator
 } from "./signaling-utils";
+import { GracefulShutdown } from "./graceful-shutdown";
+import { validateWebSocketOrigin } from "./security";
+import { MessageRouter } from "./message-router";
 
 // In-memory room and participant tracking
 interface Participant {
@@ -57,6 +60,11 @@ const metrics = new MetricsTracker();
 const coalescer = new MessageCoalescer();
 const backpressureMonitor = new BackpressureMonitor();
 const payloadValidator = new PayloadValidator();
+
+// Phase 2: Initialize message router with feature flag
+const ROUTER_ENABLED = process.env.ROUTER_ENABLED !== 'false'; // Default: true
+const DEBUG_SDP = process.env.DEBUG_SDP === 'true'; // Default: false
+const router = new MessageRouter(metrics, DEBUG_SDP);
 
 // Rate limiters
 const iceCandidateRateLimiter = new TokenBucketRateLimiter(50, 50, 100); // 50/sec, burst 100
@@ -163,7 +171,20 @@ export async function registerRoutes(app: Express): Promise<Server> {
   const httpServer = createServer(app);
 
   // WebSocket server on /ws path
-  const wss = new WebSocketServer({ server: httpServer, path: '/ws' });
+  const wss = new WebSocketServer({ 
+    server: httpServer, 
+    path: '/ws',
+    // Phase 1: WebSocket origin validation
+    verifyClient: (info: { origin: string; req: any }) => {
+      const origin = info.origin || info.req.headers.origin;
+      const isValid = validateWebSocketOrigin(origin);
+      if (!isValid) {
+        console.warn('🚫 WebSocket connection rejected - invalid origin:', origin);
+        metrics.increment('ws_rejected_origin');
+      }
+      return isValid;
+    }
+  });
 
   wss.on('connection', (ws: WebSocket) => {
     let currentParticipant: Participant | null = null;
@@ -176,7 +197,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     console.log('🔌 New WebSocket connection:', socketId);
     metrics.increment('ws_connections_total');
 
-    ws.on('message', (raw) => {
+    ws.on('message', async (raw) => {
       const msgStart = Date.now();
       let msg: any;
       try {
@@ -217,6 +238,26 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
 
       console.log('📩 WS Message:', msg.type, msg);
+
+      // Phase 2: Try router first if enabled (shim pattern - reuse already-parsed message)
+      let handled = false;
+      if (ROUTER_ENABLED) {
+        try {
+          handled = await router.route(ws, msg, socketId);
+          if (handled) {
+            metrics.increment('msgs_handled_total', { handled_by: 'router', type: msg.type });
+            return; // Router handled it, skip legacy
+          }
+        } catch (error) {
+          console.error('[Shim] Router error, falling back to legacy:', error);
+          metrics.increment('router_errors');
+        }
+      }
+
+      // If router didn't handle or disabled, use legacy switch
+      if (!handled) {
+        metrics.increment('msgs_handled_total', { handled_by: 'legacy', type: msg.type });
+      }
 
       // Helper function to send message with backpressure check and ack
       const sendMessage = (targetWs: WebSocket, message: any, critical: boolean = true) => {
@@ -1294,6 +1335,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
     // Cleanup expired sessions
     sessionManager.cleanupExpired();
   }, 30000);
+
+  // Phase 1: Initialize graceful shutdown
+  const gracefulShutdown = new GracefulShutdown(httpServer, wss, 5000);
+  gracefulShutdown.init();
+  console.log('✅ Graceful shutdown initialized (max 5s drain)');
 
   return httpServer;
 }

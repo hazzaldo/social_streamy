@@ -1,0 +1,75 @@
+Option B — phased refactor with zero-downtime migration
+
+Goals
+
+Keep existing switch-based handlers working while we migrate.
+
+Land graceful shutdown + security now (global).
+
+Migrate the most critical WS message types first, behind a router, with a shim fallback.
+
+Plan (in this order)
+
+Integrate global pieces now (no behavior change)
+
+Wire graceful shutdown (SIGTERM/SIGINT drain, max 5s).
+
+Enable security module (CORS allowlist via ALLOWED_ORIGINS, security headers, WS origin check).
+
+Keep the current switch handler live.
+
+Introduce router in parallel (shim)
+
+Add router.route(ws, msg) before the switch.
+
+If router returns handled=true, skip the legacy switch; else fall back to the switch.
+
+Log a single “router_handled” metric by type.
+
+Migrate critical handlers (wave 1)
+
+join_stream, resume, webrtc_offer, webrtc_answer, ice_candidate
+
+Use strict schemas, msgId dedup, per-sender seq, acks, and existing rate limits/coalescing.
+
+DoD: Harness H1–H5, R1–R2, T1 all PASS.
+
+Migrate co-host control (wave 2)
+
+cohost_request, cohost_cancel, cohost_accept, cohost_decline, cohost_end
+
+Preserve queue semantics + server broadcasts.
+
+DoD: Validation runner H4/H5 PASS; Stress panel “Resume Test” PASS.
+
+Migrate game rails (wave 3)
+
+game_init, game_state (broadcast only), game_event (rate-limited)
+
+Keep 33ms coalescing for state patches.
+
+DoD: G1–G4 PASS; version monotonic; Stress “Coalescing Check” PASS.
+
+Flip the default & remove legacy
+
+After all three waves pass: invert shim so router is default, switch is backup for one commit, then remove the switch entirely.
+
+Ensure /metrics exposes errors_total{code}, acks_total{type}, drops_total{type}, plus per-type handled_by="router|legacy" until removal.
+
+Safety rails
+
+Feature flag: ROUTER_ENABLED=true (default on). Allow false to force legacy for emergency rollback.
+
+Never log SDP unless DEBUG_SDP=true.
+
+Keep MAX_VIEWERS enforcement and normalized error { code, message, ref }.
+
+Acceptance (end-to-end)
+
+All validation tests (H1–H5, R1–R2, T1, G1–G4) PASS with ROUTER_ENABLED=true.
+
+Stress panel: Duplicate, ICE flood, Game spam, Coalescing, Resume all PASS.
+
+/healthz and /metrics show labeled counters; no elevated error rates vs legacy.
+
+Graceful shutdown drains acks; clients auto-resume on restart.

@@ -1,8 +1,14 @@
 import express, { type Request, Response, NextFunction } from "express";
 import { registerRoutes } from "./routes";
 import { setupVite, serveStatic, log } from "./vite";
+import { corsMiddleware, securityHeadersMiddleware } from "./security";
 
 const app = express();
+
+// Phase 1: Security middleware (global)
+app.use(corsMiddleware);
+app.use(securityHeadersMiddleware);
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
 
