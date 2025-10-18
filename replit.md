@@ -45,6 +45,9 @@ Minimal, mobile-first UI for public-facing host (`/host/:id`) and viewer (`/view
 **Signaling Server Optimization:**
 Production-ready signaling infrastructure with message deduplication, payload validation, field sanitization, and token bucket rate limiting for ICE candidates and game events. Includes graceful shutdown, CORS allowlist, security headers, and WebSocket origin validation. Critical handlers are migrated to a MessageRouter with schema validation, with rollback capabilities. Features message coalescing, backpressure monitoring, session management with tokens, room lifecycle management, and Prometheus-compatible observability.
 
+**Adaptive Streaming Quality:**
+Production-ready quality system with platform-optimized video capture (720p@30fps, voice-optimized audio), codec selection (H.264 for iOS/Safari, VP9 preferred elsewhere), and three-tier bitrate ladder (High: 2.5Mbps, Medium: 1.2Mbps, Low: 600kbps). Features health-driven adaptive quality managers that poll getStats() every 2 seconds to calculate connection health from packet loss, RTT, and bitrate, automatically switching quality profiles to maintain smooth streaming. Per-viewer quality isolation ensures weak connections don't penalize others in mesh fan-out. Quality settings (codec preferences, bitrate profiles, degradation preferences, content hints) persist across renegotiations. OPUS audio optimized at 64-96kbps with high priority. Validation suite includes Q1-Q5 tests for quality metrics baseline, adaptive throttling, recovery, codec selection, and resolution constraints.
+
 ### Feature Specifications
 - **Core Objects & Roles:** User, Creator, Session, Round, Wallet/Coins.
 - **Modes:** OFFLINE, SOLO_PRIVATE, SOLO_PUBLIC, MATCH_PENDING, CO_STREAM_PUBLIC, CO_STREAM_PRIVATE, ROUND_ACTIVE, ROUND_COMPLETE.
