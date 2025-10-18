@@ -30,6 +30,29 @@ export async function registerRoutes(app: Express): Promise<Server> {
     res.json({ ok: true, timestamp: new Date().toISOString() });
   });
 
+  app.get('/healthz', (_req, res) => {
+    // Enhanced health endpoint with connection summary
+    const summary = {
+      ok: true,
+      timestamp: new Date().toISOString(),
+      stats: {
+        totalRooms: rooms.size,
+        rooms: Array.from(rooms.entries()).map(([streamId, roomState]) => ({
+          streamId,
+          totalParticipants: roomState.participants.size,
+          roles: {
+            hosts: Array.from(roomState.participants.values()).filter(p => p.role === 'host').length,
+            viewers: Array.from(roomState.participants.values()).filter(p => p.role === 'viewer').length,
+            guests: Array.from(roomState.participants.values()).filter(p => p.role === 'guest').length
+          },
+          activeGuestId: roomState.activeGuestId,
+          cohostQueueSize: roomState.cohostQueue.length
+        }))
+      }
+    };
+    res.json(summary);
+  });
+
   app.get('/_version', (_req, res) => {
     res.json({
       ts: new Date().toISOString(),
@@ -92,6 +115,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
               activeGuestId: null,
               cohostQueue: []
             });
+            console.log('🆕 Room created:', {
+              streamId,
+              totalRooms: rooms.size
+            });
           }
           const roomState = rooms.get(streamId)!;
           const room = roomState.participants;
@@ -103,7 +130,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
           currentParticipant = { ws, userId: String(userId), streamId, role };
           room.set(String(userId), currentParticipant);
 
-          console.log(`✅ ${role.toUpperCase()} joined stream:`, { streamId, userId, roomSize: room.size });
+          console.log(`✅ ${role.toUpperCase()} joined stream:`, { 
+            streamId, 
+            userId, 
+            roomSize: room.size,
+            totalRooms: rooms.size 
+          });
 
           // If viewer joined, notify the host
           if (role === 'viewer') {
@@ -131,8 +163,18 @@ export async function registerRoutes(app: Express): Promise<Server> {
         case 'leave_stream': {
           const { streamId, userId } = msg;
           if (!streamId || !userId) return;
-
+          
           const roomState = rooms.get(streamId);
+          const participant = roomState?.participants.get(String(userId));
+          const role = participant?.role || 'unknown';
+          console.log('👋 leave_stream:', { 
+            streamId, 
+            userId,
+            role,
+            roomSize: roomState?.participants.size || 0,
+            totalRooms: rooms.size
+          });
+
           if (roomState) {
             const room = roomState.participants;
             const participant = room.get(String(userId));
@@ -401,7 +443,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
           const participant = room.get(String(guestUserId));
           if (participant) {
             participant.role = 'guest';
-            console.log('✅ Promoted viewer to guest:', guestUserId);
+            console.log('✅ Promoted viewer to guest:', {
+              streamId,
+              userId: guestUserId,
+              roomSize: room.size
+            });
 
             // Notify the guest
             if (participant.ws.readyState === WebSocket.OPEN) {
@@ -609,9 +655,19 @@ export async function registerRoutes(app: Express): Promise<Server> {
           }
 
           room.delete(userId);
+          console.log(`🚪 ${role.toUpperCase()} left stream:`, {
+            streamId,
+            userId,
+            roomSize: room.size,
+            totalRooms: rooms.size
+          });
+          
           if (room.size === 0) {
             rooms.delete(streamId);
-            console.log(`🗑️ Room deleted (participant disconnect):`, streamId);
+            console.log(`🗑️ Room deleted (last participant left):`, {
+              streamId,
+              totalRooms: rooms.size
+            });
           } else {
             broadcastToRoom(streamId, {
               type: 'participant_count_update',
@@ -654,6 +710,19 @@ export async function registerRoutes(app: Express): Promise<Server> {
   }
 
   console.log('✅ WebSocket server initialized at /ws');
+
+  // Periodic connection summary logging (every 60 seconds)
+  setInterval(() => {
+    if (rooms.size === 0) return; // Don't log if no active rooms
+    
+    const summary = {
+      timestamp: new Date().toISOString(),
+      totalRooms: rooms.size,
+      totalParticipants: Array.from(rooms.values()).reduce((sum, r) => sum + r.participants.size, 0),
+      activeGuestSessions: Array.from(rooms.values()).filter(r => r.activeGuestId !== null).length
+    };
+    console.log('📊 Connection Summary:', summary);
+  }, 60000);
 
   return httpServer;
 }
