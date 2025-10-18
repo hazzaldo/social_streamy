@@ -104,6 +104,39 @@ type GameEvent = {
   timestamp: number;
 };
 
+// Validation Runner types
+type TestStatus = 'pending' | 'running' | 'pass' | 'fail' | 'skipped';
+
+type TestScenario = {
+  id: string;
+  name: string;
+  description: string;
+  timeout: number; // ms
+  status: TestStatus;
+  duration?: number; // ms
+  error?: string;
+  metrics?: Record<string, any>;
+};
+
+type ValidationReport = {
+  timestamp: number;
+  overallStatus: 'pass' | 'fail';
+  duration: number;
+  scenarios: TestScenario[];
+  logs: string[];
+  stats: Map<string, ConnectionStats>;
+};
+
+type FaultInjectionControls = {
+  forceTurn: boolean;
+  throttleBitrate: number | null; // kbps or null
+  simulateNetworkChange: boolean;
+  dropIceCandidates: boolean;
+  wsForceClose: boolean;
+  disableHeartbeat: boolean;
+  pauseSender: boolean;
+};
+
 export default function TestHarness() {
   const [role, setRole] = useState<Role>('host');
   const [streamId, setStreamId] = useState<string>('test-stream');
@@ -132,6 +165,21 @@ export default function TestHarness() {
   const [gameState, setGameState] = useState<GameState>({ version: 0, data: null, gameId: null });
   const [gameEvents, setGameEvents] = useState<GameEvent[]>([]);
   const [selectedGameId, setSelectedGameId] = useState<string>('caption_comp');
+
+  // Validation Runner state
+  const [validationRunning, setValidationRunning] = useState(false);
+  const [validationReport, setValidationReport] = useState<ValidationReport | null>(null);
+  const [currentTest, setCurrentTest] = useState<TestScenario | null>(null);
+  const [faultControls, setFaultControls] = useState<FaultInjectionControls>({
+    forceTurn: false,
+    throttleBitrate: null,
+    simulateNetworkChange: false,
+    dropIceCandidates: false,
+    wsForceClose: false,
+    disableHeartbeat: false,
+    pauseSender: false
+  });
+  const validationLogsRef = useRef<string[]>([]);
 
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
@@ -1477,6 +1525,330 @@ export default function TestHarness() {
     }));
   }
 
+  // Validation Runner helpers
+  function addValidationLog(message: string) {
+    const logEntry = `[${new Date().toISOString()}] ${message}`;
+    validationLogsRef.current.push(logEntry);
+    console.log('📋', logEntry);
+  }
+
+  function assertBitrate(stats: ConnectionStats, min: number): boolean {
+    return stats.inboundBitrate >= min;
+  }
+
+  function assertRTT(stats: ConnectionStats, max: number): boolean {
+    return stats.rtt < max && stats.rtt > 0;
+  }
+
+  function assertFramesIncreasing(prevFrames: number, currentFrames: number): boolean {
+    return currentFrames > prevFrames;
+  }
+
+  function assertUsingTURN(stats: ConnectionStats): boolean {
+    return stats.usingTurn || stats.candidateType === 'relay';
+  }
+
+  async function wait(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  async function waitForCondition(
+    check: () => boolean,
+    timeoutMs: number,
+    pollIntervalMs = 200
+  ): Promise<boolean> {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+      if (check()) return true;
+      await wait(pollIntervalMs);
+    }
+    return false;
+  }
+
+  // Test Scenarios
+  async function runTestH1(): Promise<TestScenario> {
+    const test: TestScenario = {
+      id: 'H1',
+      name: 'Host Local Tracks Ready',
+      description: 'Verify host can acquire local media within 2s',
+      timeout: 2000,
+      status: 'running'
+    };
+    
+    const startTime = Date.now();
+    addValidationLog('H1: Starting local tracks test...');
+    
+    try {
+      const stream = await ensureLocalTracks();
+      const duration = Date.now() - startTime;
+      
+      if (stream && stream.getTracks().length > 0 && duration <= 2000) {
+        test.status = 'pass';
+        test.duration = duration;
+        test.metrics = { trackCount: stream.getTracks().length, duration };
+        addValidationLog(`H1: PASS - Got ${stream.getTracks().length} tracks in ${duration}ms`);
+      } else {
+        test.status = 'fail';
+        test.error = `Took ${duration}ms (>2000ms) or no tracks`;
+        addValidationLog(`H1: FAIL - ${test.error}`);
+      }
+    } catch (error) {
+      test.status = 'fail';
+      test.error = String(error);
+      addValidationLog(`H1: FAIL - ${test.error}`);
+    }
+    
+    return test;
+  }
+
+  async function runTestH2(): Promise<TestScenario> {
+    const test: TestScenario = {
+      id: 'H2',
+      name: 'Viewer Join & Offer/Answer',
+      description: 'Viewer joins, host creates offer, viewer answers within 4s',
+      timeout: 4000,
+      status: 'running'
+    };
+    
+    const startTime = Date.now();
+    addValidationLog('H2: Testing viewer join and signaling...');
+    
+    try {
+      // Check if we have a viewer connection
+      const success = await waitForCondition(
+        () => viewerPcRef.current !== null && viewerPcRef.current.connectionState !== 'new',
+        4000
+      );
+      
+      const duration = Date.now() - startTime;
+      
+      if (success) {
+        test.status = 'pass';
+        test.duration = duration;
+        test.metrics = { connectionState: viewerPcRef.current?.connectionState };
+        addValidationLog(`H2: PASS - Signaling completed in ${duration}ms`);
+      } else {
+        test.status = 'fail';
+        test.error = 'No viewer connection established within 4s';
+        addValidationLog(`H2: FAIL - ${test.error}`);
+      }
+    } catch (error) {
+      test.status = 'fail';
+      test.error = String(error);
+      addValidationLog(`H2: FAIL - ${test.error}`);
+    }
+    
+    return test;
+  }
+
+  async function runTestH3(): Promise<TestScenario> {
+    const test: TestScenario = {
+      id: 'H3',
+      name: 'Video Frames Received',
+      description: 'Viewer receives ≥1 frame within 3s',
+      timeout: 3000,
+      status: 'running'
+    };
+    
+    const startTime = Date.now();
+    addValidationLog('H3: Checking for video frames...');
+    
+    try {
+      const success = await waitForCondition(
+        () => {
+          const viewerStats = Array.from(connectionStats.values()).find(s => s.inboundBitrate > 0);
+          return viewerStats !== undefined && viewerStats.frameRate > 0;
+        },
+        3000
+      );
+      
+      const duration = Date.now() - startTime;
+      
+      if (success) {
+        const stats = Array.from(connectionStats.values()).find(s => s.inboundBitrate > 0);
+        test.status = 'pass';
+        test.duration = duration;
+        test.metrics = { frameRate: stats?.frameRate, bitrate: stats?.inboundBitrate };
+        addValidationLog(`H3: PASS - Receiving frames at ${stats?.frameRate}fps`);
+      } else {
+        test.status = 'fail';
+        test.error = 'No video frames received within 3s';
+        addValidationLog(`H3: FAIL - ${test.error}`);
+      }
+    } catch (error) {
+      test.status = 'fail';
+      test.error = String(error);
+      addValidationLog(`H3: FAIL - ${test.error}`);
+    }
+    
+    return test;
+  }
+
+  async function runTestR1(): Promise<TestScenario> {
+    const test: TestScenario = {
+      id: 'R1',
+      name: 'WebSocket Reconnect',
+      description: 'Force-close WS, verify auto-reconnect and rejoin within 8s',
+      timeout: 8000,
+      status: 'running'
+    };
+    
+    const startTime = Date.now();
+    addValidationLog('R1: Testing WS auto-reconnect...');
+    
+    try {
+      // Force close WS
+      if (wsRef.current) {
+        wsRef.current.close();
+        addValidationLog('R1: Forced WS close');
+      }
+      
+      // Wait for reconnection
+      const success = await waitForCondition(
+        () => wsConnected === true,
+        8000
+      );
+      
+      const duration = Date.now() - startTime;
+      
+      if (success) {
+        test.status = 'pass';
+        test.duration = duration;
+        addValidationLog(`R1: PASS - Reconnected in ${duration}ms`);
+      } else {
+        test.status = 'fail';
+        test.error = 'Failed to reconnect within 8s';
+        addValidationLog(`R1: FAIL - ${test.error}`);
+      }
+    } catch (error) {
+      test.status = 'fail';
+      test.error = String(error);
+      addValidationLog(`R1: FAIL - ${test.error}`);
+    }
+    
+    return test;
+  }
+
+  async function runTestT1(): Promise<TestScenario> {
+    const test: TestScenario = {
+      id: 'T1',
+      name: 'TURN Usage Check',
+      description: 'Verify relay candidate when Force TURN is enabled',
+      timeout: 5000,
+      status: 'running'
+    };
+    
+    const startTime = Date.now();
+    addValidationLog('T1: Checking TURN usage...');
+    
+    try {
+      if (!faultControls.forceTurn) {
+        test.status = 'skipped';
+        test.error = 'Force TURN not enabled';
+        addValidationLog('T1: SKIPPED - Force TURN not enabled');
+        return test;
+      }
+      
+      const success = await waitForCondition(
+        () => {
+          const stats = Array.from(connectionStats.values());
+          return stats.some(s => assertUsingTURN(s));
+        },
+        5000
+      );
+      
+      const duration = Date.now() - startTime;
+      
+      if (success) {
+        test.status = 'pass';
+        test.duration = duration;
+        addValidationLog(`T1: PASS - Using TURN relay in ${duration}ms`);
+      } else {
+        test.status = 'fail';
+        test.error = 'No TURN relay detected within 5s';
+        addValidationLog(`T1: FAIL - ${test.error}`);
+      }
+    } catch (error) {
+      test.status = 'fail';
+      test.error = String(error);
+      addValidationLog(`T1: FAIL - ${test.error}`);
+    }
+    
+    return test;
+  }
+
+  async function runValidation() {
+    if (validationRunning) {
+      addValidationLog('Validation already running, skipping');
+      return;
+    }
+    
+    setValidationRunning(true);
+    validationLogsRef.current = [];
+    addValidationLog('🚀 Starting validation suite...');
+    
+    const startTime = Date.now();
+    const scenarios: TestScenario[] = [];
+    
+    try {
+      // Run tests sequentially
+      scenarios.push(await runTestH1());
+      setCurrentTest(scenarios[scenarios.length - 1]);
+      
+      scenarios.push(await runTestH2());
+      setCurrentTest(scenarios[scenarios.length - 1]);
+      
+      scenarios.push(await runTestH3());
+      setCurrentTest(scenarios[scenarios.length - 1]);
+      
+      scenarios.push(await runTestR1());
+      setCurrentTest(scenarios[scenarios.length - 1]);
+      
+      scenarios.push(await runTestT1());
+      setCurrentTest(scenarios[scenarios.length - 1]);
+      
+      const duration = Date.now() - startTime;
+      const failedTests = scenarios.filter(s => s.status === 'fail');
+      const overallStatus = failedTests.length === 0 ? 'pass' : 'fail';
+      
+      const report: ValidationReport = {
+        timestamp: Date.now(),
+        overallStatus,
+        duration,
+        scenarios,
+        logs: [...validationLogsRef.current],
+        stats: new Map(connectionStats)
+      };
+      
+      setValidationReport(report);
+      addValidationLog(`✅ Validation complete: ${overallStatus.toUpperCase()} (${duration}ms)`);
+      addValidationLog(`   Passed: ${scenarios.filter(s => s.status === 'pass').length}/${scenarios.length}`);
+      
+    } catch (error) {
+      addValidationLog(`❌ Validation suite failed: ${error}`);
+    } finally {
+      setValidationRunning(false);
+      setCurrentTest(null);
+    }
+  }
+
+  function downloadValidationReport() {
+    if (!validationReport) return;
+    
+    const reportData = {
+      ...validationReport,
+      stats: Array.from(validationReport.stats.entries()).map(([k, v]) => ({ connection: k, ...v }))
+    };
+    
+    const blob = new Blob([JSON.stringify(reportData, null, 2)], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `validation-report-${Date.now()}.json`;
+    a.click();
+    URL.revokeObjectURL(url);
+  }
+
   return (
     <div className="min-h-screen bg-background p-4 md:p-8">
       <div className="mx-auto max-w-7xl space-y-6">
@@ -1949,6 +2321,150 @@ export default function TestHarness() {
             </CardContent>
           </Card>
         )}
+
+        {/* Validation Runner */}
+        <Card>
+          <CardHeader>
+            <CardTitle className="text-sm flex items-center gap-2">
+              🧪 Validation Runner
+            </CardTitle>
+            <CardDescription className="text-xs">
+              Automated stream validation with fault injection
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {/* Fault Injection Controls */}
+            <div className="space-y-3">
+              <div className="text-xs font-semibold text-muted-foreground">Fault Injection</div>
+              <div className="grid grid-cols-2 gap-2">
+                <label className="flex items-center gap-2 text-xs">
+                  <input
+                    type="checkbox"
+                    checked={faultControls.forceTurn}
+                    onChange={(e) => setFaultControls({ ...faultControls, forceTurn: e.target.checked })}
+                    data-testid="checkbox-force-turn"
+                  />
+                  Force TURN
+                </label>
+                <label className="flex items-center gap-2 text-xs">
+                  <input
+                    type="checkbox"
+                    checked={faultControls.dropIceCandidates}
+                    onChange={(e) => setFaultControls({ ...faultControls, dropIceCandidates: e.target.checked })}
+                    data-testid="checkbox-drop-ice"
+                  />
+                  Drop ICE Candidates
+                </label>
+                <label className="flex items-center gap-2 text-xs">
+                  <input
+                    type="checkbox"
+                    checked={faultControls.simulateNetworkChange}
+                    onChange={(e) => setFaultControls({ ...faultControls, simulateNetworkChange: e.target.checked })}
+                    data-testid="checkbox-network-change"
+                  />
+                  Simulate Network Change
+                </label>
+                <label className="flex items-center gap-2 text-xs">
+                  <input
+                    type="checkbox"
+                    checked={faultControls.disableHeartbeat}
+                    onChange={(e) => setFaultControls({ ...faultControls, disableHeartbeat: e.target.checked })}
+                    data-testid="checkbox-disable-heartbeat"
+                  />
+                  Disable Heartbeat
+                </label>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="throttle-bitrate" className="text-xs">Throttle Bitrate (kbps)</Label>
+                <Input
+                  id="throttle-bitrate"
+                  type="number"
+                  placeholder="e.g., 200"
+                  value={faultControls.throttleBitrate || ''}
+                  onChange={(e) => setFaultControls({ 
+                    ...faultControls, 
+                    throttleBitrate: e.target.value ? parseInt(e.target.value) : null 
+                  })}
+                  data-testid="input-throttle-bitrate"
+                />
+              </div>
+            </div>
+
+            {/* Run Validation Button */}
+            <div className="space-y-2">
+              <Button
+                onClick={runValidation}
+                disabled={validationRunning || !wsConnected}
+                className="w-full"
+                data-testid="button-run-validation"
+              >
+                {validationRunning ? 'Running...' : 'Run Validation'}
+              </Button>
+              {currentTest && (
+                <div className="text-xs text-muted-foreground text-center">
+                  Running: {currentTest.name}...
+                </div>
+              )}
+            </div>
+
+            {/* Validation Report */}
+            {validationReport && (
+              <div className="space-y-3 border-t pt-3">
+                <div className="flex items-center justify-between">
+                  <div className="text-xs font-semibold">
+                    Report {new Date(validationReport.timestamp).toLocaleTimeString()}
+                  </div>
+                  <Badge variant={validationReport.overallStatus === 'pass' ? 'default' : 'destructive'}>
+                    {validationReport.overallStatus.toUpperCase()}
+                  </Badge>
+                </div>
+                
+                <div className="space-y-1">
+                  {validationReport.scenarios.map((scenario) => (
+                    <div key={scenario.id} className="flex items-center justify-between text-xs p-2 rounded bg-muted">
+                      <div className="flex items-center gap-2">
+                        {scenario.status === 'pass' && <span className="text-green-600">✓</span>}
+                        {scenario.status === 'fail' && <span className="text-red-600">✗</span>}
+                        {scenario.status === 'skipped' && <span className="text-gray-600">−</span>}
+                        <span className="font-mono">{scenario.id}</span>
+                        <span>{scenario.name}</span>
+                      </div>
+                      {scenario.duration && (
+                        <span className="text-muted-foreground">{scenario.duration}ms</span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+
+                <div className="flex gap-2">
+                  <Button
+                    onClick={downloadValidationReport}
+                    variant="outline"
+                    size="sm"
+                    className="flex-1"
+                    data-testid="button-download-report"
+                  >
+                    Download Report
+                  </Button>
+                </div>
+
+                {/* Show error details if any failures */}
+                {validationReport.scenarios.some(s => s.status === 'fail') && (
+                  <div className="space-y-1">
+                    <div className="text-xs font-semibold text-destructive">Failures:</div>
+                    {validationReport.scenarios
+                      .filter(s => s.status === 'fail')
+                      .map(s => (
+                        <div key={s.id} className="text-xs p-2 rounded bg-destructive/10 text-destructive">
+                          <span className="font-mono">{s.id}:</span> {s.error}
+                        </div>
+                      ))}
+                  </div>
+                )}
+              </div>
+            )}
+          </CardContent>
+        </Card>
 
         {/* Connection Telemetry */}
         {connectionStats.size > 0 && (

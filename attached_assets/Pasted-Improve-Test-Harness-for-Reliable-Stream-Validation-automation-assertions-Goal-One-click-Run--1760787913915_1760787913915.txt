@@ -1,0 +1,75 @@
+Improve Test Harness for Reliable Stream Validation (automation + assertions)
+
+Goal: One-click “Run Validation” that spins up Host/Guest/Viewer flows (same tab/iframed roles), executes scenarios, and produces a pass/fail report with metrics.
+
+Add to Test Harness
+
+Validation Runner
+
+Button: Run Validation with subtests:
+
+H1 Host local tracks ready (≤2s).
+
+H2 Viewer join → host→viewer offer/answer completes (≤4s).
+
+H3 Video frames received by Viewer (≥1 frame within 3s).
+
+H4 Guest upgrade flow → bidirectional media working.
+
+H5 Guest fan-out to Viewer (Viewer sees 2 streams).
+
+R1 WS reconnect test: force-close WS → auto-reconnect + rejoin.
+
+R2 ICE restart test: simulate network change → connectionState returns to “connected”.
+
+T1 TURN usage check: verify selected pair is relay when “Force TURN” is toggled.
+
+Each subtest yields PASS/FAIL + timing; show a final summary with green/red badges.
+
+Controls & Fault Injection
+
+Toggles: Force TURN, Simulate Network Change, Drop ICE Candidate Pair, Pause/Resume Sender, Throttle Bitrate (200 kbps).
+
+WS: Force Close, Disable Heartbeat for 10s, then re-enable.
+
+Page visibility: Hide/Show programmatically to trigger autoplay/visibility handlers.
+
+Telemetry Assertions
+
+Collect getStats every 2s (already implemented) and assert thresholds during tests:
+
+Good path: inbound bitrate ≥ 800 kbps (when not throttled), RTT < 200 ms, framesReceived increasing.
+
+Degraded path (throttle enabled): badge shows “Degraded” within 5s.
+
+Display selected ICE candidate type and usingTURN.
+
+Artifacts
+
+Save a Validation Report JSON (per run) with timestamps, role, stats snapshots, decisions.
+
+On FAIL, capture last 10 log lines per role into the report.
+
+API endpoints for CI
+
+Expose /validate (server triggers the harness in headless mode if possible) and return the JSON report.
+
+Extend /healthz to include last validation result summary.
+
+Acceptance Criteria
+
+Clicking Run Validation executes H1–T1 automatically and shows a single PASS/FAIL report.
+
+“Force TURN” causes relay candidate pair within 5s (or test marks FAIL).
+
+WS force-close triggers auto-reconnect and role rejoin within 8s.
+
+Simulated network change triggers ICE restart and returns to connected within 10s.
+
+Report JSON downloadable from the UI.
+
+Nice-to-have (if time)
+
+Per-track mini overlay (fps/kbps/loss) on each video.
+
+“Copy Debug Bundle” button (JSON report + recent logs).
