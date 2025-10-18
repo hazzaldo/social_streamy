@@ -76,6 +76,10 @@ export default function Host() {
   // Renegotiation queue for glare safety
   const renegotiationInProgress = useRef(false);
   const pendingRenegotiation = useRef(false);
+  
+  // Connection recovery state (tracks retry attempts per connection)
+  const recoveryAttempts = useRef<Map<string, number>>(new Map());
+  const recoveryTimeouts = useRef<Map<string, NodeJS.Timeout>>(new Map());
 
   // WebSocket setup and reconnection
   useEffect(() => {
@@ -220,6 +224,69 @@ export default function Host() {
     };
   }, [isLive, streamId, userId]);
 
+  /**
+   * Attempt connection recovery with exponential backoff (2s, 4s, 8s)
+   * Max 3 attempts before giving up
+   */
+  function attemptRecovery(connectionId: string, pc: RTCPeerConnection, qualityManager?: AdaptiveQualityManager) {
+    const attempts = recoveryAttempts.current.get(connectionId) || 0;
+    
+    // Clear any pending recovery timeout
+    const existingTimeout = recoveryTimeouts.current.get(connectionId);
+    if (existingTimeout) {
+      clearTimeout(existingTimeout);
+    }
+    
+    // Max 3 attempts
+    if (attempts >= 3) {
+      console.log(`❌ Connection recovery failed after 3 attempts: ${connectionId}`);
+      recoveryAttempts.current.delete(connectionId);
+      recoveryTimeouts.current.delete(connectionId);
+      
+      toast({
+        title: 'Connection Lost',
+        description: `Failed to recover connection for ${connectionId.substring(0, 8)}`,
+        variant: 'destructive',
+      });
+      return;
+    }
+    
+    // Exponential backoff: 2s, 4s, 8s
+    const delays = [2000, 4000, 8000];
+    const delay = delays[attempts];
+    
+    console.log(`🔄 Scheduling recovery attempt ${attempts + 1}/3 for ${connectionId} in ${delay}ms`);
+    
+    const timeout = setTimeout(async () => {
+      console.log(`🔄 Attempting recovery ${attempts + 1}/3 for ${connectionId}`);
+      
+      // Increment attempt counter
+      recoveryAttempts.current.set(connectionId, attempts + 1);
+      
+      // Trigger ICE restart
+      await restartICE(pc, qualityManager);
+      
+      toast({
+        title: 'Reconnecting...',
+        description: `Attempt ${attempts + 1} of 3`,
+      });
+    }, delay);
+    
+    recoveryTimeouts.current.set(connectionId, timeout);
+  }
+  
+  /**
+   * Clear recovery state when connection succeeds
+   */
+  function clearRecoveryState(connectionId: string) {
+    const existingTimeout = recoveryTimeouts.current.get(connectionId);
+    if (existingTimeout) {
+      clearTimeout(existingTimeout);
+    }
+    recoveryAttempts.current.delete(connectionId);
+    recoveryTimeouts.current.delete(connectionId);
+  }
+
   async function createViewerConnection(viewerUserId: string) {
     const pc = new RTCPeerConnection(ICE_CONFIG);
     viewerPcs.current.set(viewerUserId, pc);
@@ -283,11 +350,13 @@ export default function Host() {
     // Also handle ICE failures with restart
     pc.onconnectionstatechange = () => {
       if (pc.connectionState === 'connected') {
+        // Connection succeeded - clear recovery state and request keyframe
+        clearRecoveryState(`viewer-${viewerUserId}`);
         requestKeyFrame(pc);
       } else if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
-        // Restart ICE on connection failure (re-enables candidate gathering)
+        // Connection failed - attempt recovery with exponential backoff (2s, 4s, 8s)
         const qualityManager = qualityManagers.current.get(viewerUserId);
-        restartICE(pc, qualityManager);
+        attemptRecovery(`viewer-${viewerUserId}`, pc, qualityManager);
       }
     };
     
@@ -362,9 +431,13 @@ export default function Host() {
     
     // Monitor connection state for ICE restart
     pc.onconnectionstatechange = () => {
-      if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+      if (pc.connectionState === 'connected') {
+        // Connection succeeded - clear recovery state
+        clearRecoveryState('guest');
+      } else if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
+        // Connection failed - attempt recovery with exponential backoff (2s, 4s, 8s)
         const qualityManager = qualityManagers.current.get('guest');
-        restartICE(pc, qualityManager);
+        attemptRecovery('guest', pc, qualityManager);
       }
     };
     
@@ -569,6 +642,11 @@ export default function Host() {
     // Clean up candidate handlers
     candidateHandlerCleanups.current.forEach(cleanup => cleanup());
     candidateHandlerCleanups.current.clear();
+    
+    // Clean up recovery timeouts
+    recoveryTimeouts.current.forEach(timeout => clearTimeout(timeout));
+    recoveryTimeouts.current.clear();
+    recoveryAttempts.current.clear();
     
     // Clean up guest connection and streams
     if (guestPcRef.current) {
