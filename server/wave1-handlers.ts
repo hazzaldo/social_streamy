@@ -29,40 +29,13 @@ function sendMessage(ws: WebSocket, message: any, critical: boolean = true): boo
   }
 }
 
-// Helper to send normalized ack
-function sendAck(ws: WebSocket, router: any, msgId?: string, type?: string) {
-  if (msgId) {
-    sendMessage(ws, {
-      type: 'ack',
-      for: msgId,
-      ts: Date.now()
-    }, true);
-    if (router && type) {
-      router.sendAck(msgId, type);
-    }
-  }
-}
-
-// Helper to send normalized error
-function sendError(ws: WebSocket, router: any, code: string, message: string, ref?: string) {
-  sendMessage(ws, {
-    type: 'error',
-    code,
-    message,
-    ref
-  }, true);
-  if (router) {
-    router.sendError(ws, code, message, ref);
-  }
-}
-
 /**
  * join_stream handler
  * Validates room capacity, assigns role, creates session token
  */
 export const handleJoinStream: MessageHandler = async (ws, msg, context) => {
   const { streamId, userId } = msg;
-  const { rooms, sessionManager, broadcastToRoom, currentParticipant: participantRef, sessionToken: sessionTokenRef, metrics } = context;
+  const { rooms, sessionManager, broadcastToRoom, currentParticipant: participantRef, sessionToken: sessionTokenRef, sendAck: ack, sendError: error, metrics } = context;
   
   if (!rooms || !sessionManager) {
     throw new Error('Missing required context: rooms, sessionManager');
@@ -86,7 +59,7 @@ export const handleJoinStream: MessageHandler = async (ws, msg, context) => {
   // Safety: Room capacity limit (max 100 participants)
   if (room.size >= 100 && !room.has(String(userId))) {
     console.warn('⚠️ [Wave1] Room at capacity:', { streamId, size: room.size });
-    sendError(ws, null, 'room_full', 'This room has reached maximum capacity (100 participants)', msg.msgId);
+    error?.('room_full', 'This room has reached maximum capacity (100 participants)', msg.msgId);
     metrics?.increment('errors_total', { code: 'room_full', type: 'join_stream' });
     return;
   }
@@ -160,8 +133,9 @@ export const handleJoinStream: MessageHandler = async (ws, msg, context) => {
   }
 
   // Send ack
-  sendAck(ws, null, msg.msgId, 'join_stream');
-  metrics?.increment('acks_total', { type: 'join_stream' });
+  if (msg.msgId) {
+    ack?.(msg.msgId, 'join_stream');
+  }
 };
 
 /**
@@ -170,7 +144,7 @@ export const handleJoinStream: MessageHandler = async (ws, msg, context) => {
  */
 export const handleResume: MessageHandler = async (ws, msg, context) => {
   const { sessionToken } = msg;
-  const { rooms, sessionManager, currentParticipant: participantRef, sessionToken: sessionTokenRef, metrics } = context;
+  const { rooms, sessionManager, currentParticipant: participantRef, sessionToken: sessionTokenRef, sendAck: ack, sendError: error, metrics } = context;
   
   if (!rooms || !sessionManager) {
     throw new Error('Missing required context: rooms, sessionManager');
@@ -178,7 +152,7 @@ export const handleResume: MessageHandler = async (ws, msg, context) => {
 
   const session = sessionManager.getSession(sessionToken);
   if (!session) {
-    sendError(ws, null, 'SESSION_EXPIRED', 'Session token expired or invalid', msg.msgId);
+    error?.('SESSION_EXPIRED', 'Session token expired or invalid', msg.msgId);
     metrics?.increment('errors_total', { code: 'SESSION_EXPIRED', type: 'resume' });
     return;
   }
@@ -235,8 +209,9 @@ export const handleResume: MessageHandler = async (ws, msg, context) => {
   }
 
   // Send ack
-  sendAck(ws, null, msg.msgId, 'resume');
-  metrics?.increment('acks_total', { type: 'resume' });
+  if (msg.msgId) {
+    ack?.(msg.msgId, 'resume');
+  }
 };
 
 /**
@@ -245,7 +220,7 @@ export const handleResume: MessageHandler = async (ws, msg, context) => {
  */
 export const handleWebRTCOffer: MessageHandler = async (ws, msg, context) => {
   const { toUserId, fromUserId, sdp } = msg;
-  const { rooms, currentParticipant, relayToUser, metrics, debugSdp } = context;
+  const { rooms, currentParticipant, relayToUser, sendAck: ack, metrics, debugSdp } = context;
 
   if (!debugSdp) {
     console.log('📤 [Wave1] Relaying webrtc_offer', { from: fromUserId, to: toUserId, sdpType: sdp?.type });
@@ -276,8 +251,9 @@ export const handleWebRTCOffer: MessageHandler = async (ws, msg, context) => {
   }
 
   // Send ack
-  sendAck(ws, null, msg.msgId, 'webrtc_offer');
-  metrics?.increment('acks_total', { type: 'webrtc_offer' });
+  if (msg.msgId) {
+    ack?.(msg.msgId, 'webrtc_offer');
+  }
 };
 
 /**
@@ -286,7 +262,7 @@ export const handleWebRTCOffer: MessageHandler = async (ws, msg, context) => {
  */
 export const handleWebRTCAnswer: MessageHandler = async (ws, msg, context) => {
   const { toUserId, fromUserId, sdp } = msg;
-  const { relayToUser, metrics, debugSdp } = context;
+  const { relayToUser, sendAck: ack, metrics, debugSdp } = context;
 
   if (!debugSdp) {
     console.log('📤 [Wave1] Relaying webrtc_answer', { from: fromUserId, to: toUserId, sdpType: sdp?.type });
@@ -303,8 +279,9 @@ export const handleWebRTCAnswer: MessageHandler = async (ws, msg, context) => {
   }
 
   // Send ack
-  sendAck(ws, null, msg.msgId, 'webrtc_answer');
-  metrics?.increment('acks_total', { type: 'webrtc_answer' });
+  if (msg.msgId) {
+    ack?.(msg.msgId, 'webrtc_answer');
+  }
 };
 
 /**
@@ -319,6 +296,8 @@ export const handleICECandidate: MessageHandler = async (ws, msg, context) => {
     iceCandidateRateLimiter, 
     coalescer,
     relayToUser,
+    sendAck: ack,
+    sendError: error,
     metrics 
   } = context;
 
@@ -328,7 +307,7 @@ export const handleICECandidate: MessageHandler = async (ws, msg, context) => {
     const rateKey = `ice_${authenticatedUserId}`;
     
     if (!iceCandidateRateLimiter.tryConsume(rateKey, 1)) {
-      sendError(ws, null, 'rate_limited', 'Too many ICE candidates. Please slow down.', msg.msgId);
+      error?.('rate_limited', 'Too many ICE candidates. Please slow down.', msg.msgId);
       metrics?.increment('errors_total', { code: 'rate_limited', type: 'ice_candidate' });
       metrics?.increment('rate_limited_ice_candidate');
       console.warn('⚠️ [Wave1] ICE candidate rate limit exceeded:', authenticatedUserId);
@@ -383,6 +362,7 @@ export const handleICECandidate: MessageHandler = async (ws, msg, context) => {
   }
 
   // Send ack
-  sendAck(ws, null, msg.msgId, 'ice_candidate');
-  metrics?.increment('acks_total', { type: 'ice_candidate' });
+  if (msg.msgId) {
+    ack?.(msg.msgId, 'ice_candidate');
+  }
 };

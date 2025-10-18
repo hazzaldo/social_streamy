@@ -332,7 +332,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
             iceCandidateRateLimiter,
             coalescer,
             relayToUser,
-            broadcastToRoom
+            broadcastToRoom,
+            sendAck: (msgId: string, type: string) => router.sendAck(ws, msgId, type),
+            sendError: (code: string, message: string, ref?: string) => router.sendError(ws, code, message, ref)
           };
           
           handled = await router.route(ws, msg, socketId, routerContext);

@@ -123,6 +123,8 @@ export interface MessageContext {
   coalescer?: any;
   relayToUser?: (userId: string, message: any) => void;
   broadcastToRoom?: (streamId: string, message: any) => void;
+  sendAck?: (msgId: string, type: string) => void;
+  sendError?: (code: string, message: string, ref?: string) => void;
 }
 
 // Message router class
@@ -215,12 +217,13 @@ export class MessageRouter {
     }
   }
 
-  // Send normalized ack
-  sendAck(ws: WebSocket, type: string, ref?: string) {
+  // Send normalized ack (always requires msgId for proper correlation)
+  sendAck(ws: WebSocket, msgId: string, type: string) {
     if (ws.readyState === WebSocket.OPEN) {
       const ack = {
-        type: `${type}_ack`,
-        ...(ref && { ref })
+        type: 'ack',
+        for: msgId,
+        ts: Date.now()
       };
       ws.send(JSON.stringify(ack));
       this.metrics.increment('acks_total', { type });
@@ -251,6 +254,8 @@ export class MessageRouter {
       if (this.deduplicator.isDuplicate(socketId, message.msgId)) {
         console.log(`[Router] Duplicate msgId detected: ${message.msgId}`);
         this.metrics.increment('msgs_duplicate_total', { type: message.type });
+        // Send ack for duplicate to prevent client timeout
+        this.sendAck(ws, message.msgId, message.type);
         return true; // Handled (duplicate dropped)
       }
     }
