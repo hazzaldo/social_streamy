@@ -116,6 +116,9 @@ type TestScenario = {
   duration?: number; // ms
   error?: string;
   metrics?: Record<string, any>;
+  versionEvolution?: number[]; // For game tests: [1, 2, 3...]
+  lastPatch?: any; // For game tests: last state patch
+  failureLogs?: string[]; // Last 10 logs on failure
 };
 
 type ValidationReport = {
@@ -1590,11 +1593,13 @@ export default function TestHarness() {
       } else {
         test.status = 'fail';
         test.error = `Took ${duration}ms (>2000ms) or no tracks`;
+        test.failureLogs = validationLogsRef.current.slice(-10);
         addValidationLog(`H1: FAIL - ${test.error}`);
       }
     } catch (error) {
       test.status = 'fail';
       test.error = String(error);
+      test.failureLogs = validationLogsRef.current.slice(-10);
       addValidationLog(`H1: FAIL - ${test.error}`);
     }
     
@@ -1630,11 +1635,13 @@ export default function TestHarness() {
       } else {
         test.status = 'fail';
         test.error = 'No viewer connection established within 4s';
+        test.failureLogs = validationLogsRef.current.slice(-10);
         addValidationLog(`H2: FAIL - ${test.error}`);
       }
     } catch (error) {
       test.status = 'fail';
       test.error = String(error);
+      test.failureLogs = validationLogsRef.current.slice(-10);
       addValidationLog(`H2: FAIL - ${test.error}`);
     }
     
@@ -1673,11 +1680,13 @@ export default function TestHarness() {
       } else {
         test.status = 'fail';
         test.error = 'No video frames received within 3s';
+        test.failureLogs = validationLogsRef.current.slice(-10);
         addValidationLog(`H3: FAIL - ${test.error}`);
       }
     } catch (error) {
       test.status = 'fail';
       test.error = String(error);
+      test.failureLogs = validationLogsRef.current.slice(-10);
       addValidationLog(`H3: FAIL - ${test.error}`);
     }
     
@@ -1718,11 +1727,13 @@ export default function TestHarness() {
       } else {
         test.status = 'fail';
         test.error = 'Failed to reconnect within 8s';
+        test.failureLogs = validationLogsRef.current.slice(-10);
         addValidationLog(`R1: FAIL - ${test.error}`);
       }
     } catch (error) {
       test.status = 'fail';
       test.error = String(error);
+      test.failureLogs = validationLogsRef.current.slice(-10);
       addValidationLog(`R1: FAIL - ${test.error}`);
     }
     
@@ -1766,12 +1777,578 @@ export default function TestHarness() {
       } else {
         test.status = 'fail';
         test.error = 'No TURN relay detected within 5s';
+        test.failureLogs = validationLogsRef.current.slice(-10);
         addValidationLog(`T1: FAIL - ${test.error}`);
       }
     } catch (error) {
       test.status = 'fail';
       test.error = String(error);
+      test.failureLogs = validationLogsRef.current.slice(-10);
       addValidationLog(`T1: FAIL - ${test.error}`);
+    }
+    
+    return test;
+  }
+
+  async function runTestH4(): Promise<TestScenario> {
+    const test: TestScenario = {
+      id: 'H4',
+      name: 'Guest Upgrade Flow',
+      description: 'Viewer requests → Host approves → Guest sends/receives bidirectional media',
+      timeout: 8000,
+      status: 'running'
+    };
+    
+    const startTime = Date.now();
+    addValidationLog('H4: Testing guest upgrade flow...');
+    
+    try {
+      // Simulate viewer requesting co-host
+      if (role === 'viewer') {
+        wsRef.current?.send(JSON.stringify({
+          type: 'cohost_request',
+          streamId,
+          userId
+        }));
+        addValidationLog('H4: Sent co-host request');
+        
+        // Wait for acceptance
+        const accepted = await waitForCondition(
+          () => cohostRequestState === 'accepted',
+          4000
+        );
+        
+        if (!accepted) {
+          test.status = 'fail';
+          test.error = 'Co-host request not accepted within 4s';
+          test.failureLogs = validationLogsRef.current.slice(-10);
+          addValidationLog(`H4: FAIL - ${test.error}`);
+          return test;
+        }
+        
+        addValidationLog('H4: Co-host request accepted, now guest');
+      }
+      
+      // Wait for bidirectional media (guest peer connection established)
+      const guestPcConnected = await waitForCondition(
+        () => guestPcRef.current?.connectionState === 'connected',
+        4000
+      );
+      
+      if (!guestPcConnected) {
+        test.status = 'fail';
+        test.error = 'Guest peer connection not established';
+        test.failureLogs = validationLogsRef.current.slice(-10);
+        addValidationLog(`H4: FAIL - ${test.error}`);
+        return test;
+      }
+      
+      // Wait for frames in both directions
+      const framesReceived = await waitForCondition(
+        () => {
+          const guestStats = Array.from(connectionStats.values()).find(s => 
+            s.inboundBitrate > 0 && s.frameRate > 0
+          );
+          return guestStats !== undefined;
+        },
+        3000
+      );
+      
+      const duration = Date.now() - startTime;
+      
+      if (framesReceived) {
+        const stats = Array.from(connectionStats.values()).find(s => s.inboundBitrate > 0);
+        test.status = 'pass';
+        test.duration = duration;
+        test.metrics = { 
+          frameRate: stats?.frameRate, 
+          bitrate: stats?.inboundBitrate,
+          connectionState: guestPcRef.current?.connectionState
+        };
+        addValidationLog(`H4: PASS - Bidirectional media flowing in ${duration}ms`);
+      } else {
+        test.status = 'fail';
+        test.error = 'No frames received within 3s after guest upgrade';
+        test.failureLogs = validationLogsRef.current.slice(-10);
+        addValidationLog(`H4: FAIL - ${test.error}`);
+      }
+    } catch (error) {
+      test.status = 'fail';
+      test.error = String(error);
+      test.failureLogs = validationLogsRef.current.slice(-10);
+      addValidationLog(`H4: FAIL - ${test.error}`);
+    }
+    
+    return test;
+  }
+
+  async function runTestH5(): Promise<TestScenario> {
+    const test: TestScenario = {
+      id: 'H5',
+      name: 'Guest Fan-Out',
+      description: 'With Guest active, new Viewer sees two remote streams (Host+Guest)',
+      timeout: 6000,
+      status: 'running'
+    };
+    
+    const startTime = Date.now();
+    addValidationLog('H5: Testing guest fan-out to new viewer...');
+    
+    try {
+      // Check if guest is active
+      if (!activeGuestId && role === 'host') {
+        test.status = 'skipped';
+        test.error = 'No active guest for fan-out test';
+        addValidationLog('H5: SKIPPED - No active guest');
+        return test;
+      }
+      
+      if (role === 'viewer') {
+        // As a viewer, check for two remote streams
+        const twoStreamsReceived = await waitForCondition(
+          () => {
+            const remoteVideo = remoteVideoRef.current;
+            const guestVideo = guestVideoRef.current;
+            const hasHostStream = remoteVideo?.srcObject && (remoteVideo.srcObject as MediaStream).getTracks().length > 0;
+            const hasGuestStream = guestVideo?.srcObject && (guestVideo.srcObject as MediaStream).getTracks().length > 0;
+            return !!(hasHostStream && hasGuestStream);
+          },
+          4000
+        );
+        
+        const duration = Date.now() - startTime;
+        
+        if (twoStreamsReceived) {
+          const hostTracks = (remoteVideoRef.current?.srcObject as MediaStream)?.getTracks().length || 0;
+          const guestTracks = (guestVideoRef.current?.srcObject as MediaStream)?.getTracks().length || 0;
+          test.status = 'pass';
+          test.duration = duration;
+          test.metrics = { 
+            hostTracks,
+            guestTracks,
+            totalStreams: 2
+          };
+          addValidationLog(`H5: PASS - Received Host+Guest streams in ${duration}ms`);
+        } else {
+          test.status = 'fail';
+          test.error = 'Did not receive both streams within 4s';
+          test.failureLogs = validationLogsRef.current.slice(-10);
+          addValidationLog(`H5: FAIL - ${test.error}`);
+        }
+      } else {
+        test.status = 'skipped';
+        test.error = 'Test requires viewer role';
+        addValidationLog('H5: SKIPPED - Not a viewer');
+      }
+    } catch (error) {
+      test.status = 'fail';
+      test.error = String(error);
+      test.failureLogs = validationLogsRef.current.slice(-10);
+      addValidationLog(`H5: FAIL - ${test.error}`);
+    }
+    
+    return test;
+  }
+
+  async function runTestR2(): Promise<TestScenario> {
+    const test: TestScenario = {
+      id: 'R2',
+      name: 'ICE Restart Recovery',
+      description: 'Simulate network change → disconnected/failed → back to connected',
+      timeout: 12000,
+      status: 'running'
+    };
+    
+    const startTime = Date.now();
+    addValidationLog('R2: Testing ICE restart recovery...');
+    
+    try {
+      const pc = viewerPcRef.current || guestPcRef.current;
+      if (!pc || pc.connectionState !== 'connected') {
+        test.status = 'skipped';
+        test.error = 'No active peer connection in connected state';
+        addValidationLog('R2: SKIPPED - No connected peer');
+        return test;
+      }
+      
+      const initialState = pc.connectionState;
+      addValidationLog(`R2: Initial state: ${initialState}`);
+      
+      // Trigger ICE restart manually
+      addValidationLog('R2: Triggering ICE restart...');
+      pc.restartIce();
+      
+      // Wait for disconnection/failed state
+      const disconnected = await waitForCondition(
+        () => {
+          const state = pc.connectionState;
+          return state === 'disconnected' || state === 'failed';
+        },
+        5000
+      );
+      
+      if (!disconnected) {
+        test.status = 'fail';
+        test.error = 'Connection did not enter disconnected/failed state';
+        test.failureLogs = validationLogsRef.current.slice(-10);
+        addValidationLog(`R2: FAIL - ${test.error}`);
+        return test;
+      }
+      
+      addValidationLog(`R2: Entered ${pc.connectionState} state`);
+      
+      // Wait for recovery to connected
+      const recovered = await waitForCondition(
+        () => pc.connectionState === 'connected',
+        10000
+      );
+      
+      const duration = Date.now() - startTime;
+      
+      if (recovered) {
+        test.status = 'pass';
+        test.duration = duration;
+        test.metrics = { 
+          initialState,
+          recoveredState: pc.connectionState,
+          recoveryTime: duration
+        };
+        addValidationLog(`R2: PASS - Recovered to connected in ${duration}ms`);
+      } else {
+        test.status = 'fail';
+        test.error = `Failed to recover within 10s (final state: ${pc.connectionState})`;
+        test.failureLogs = validationLogsRef.current.slice(-10);
+        addValidationLog(`R2: FAIL - ${test.error}`);
+      }
+    } catch (error) {
+      test.status = 'fail';
+      test.error = String(error);
+      test.failureLogs = validationLogsRef.current.slice(-10);
+      addValidationLog(`R2: FAIL - ${test.error}`);
+    }
+    
+    return test;
+  }
+
+  async function runTestG1(): Promise<TestScenario> {
+    const test: TestScenario = {
+      id: 'G1',
+      name: 'Game Initialization',
+      description: 'Host sends game_init; all roles receive version=1 full state',
+      timeout: 3000,
+      status: 'running',
+      versionEvolution: []
+    };
+    
+    const startTime = Date.now();
+    addValidationLog('G1: Testing game initialization...');
+    
+    try {
+      if (role !== 'host') {
+        test.status = 'skipped';
+        test.error = 'Test requires host role';
+        addValidationLog('G1: SKIPPED - Not a host');
+        return test;
+      }
+      
+      const initialGameId = 'test_game_validation';
+      const initialState = { round: 1, phase: 'init', testData: 'G1' };
+      
+      // Send game_init
+      wsRef.current?.send(JSON.stringify({
+        type: 'game_init',
+        streamId,
+        gameId: initialGameId,
+        initialState
+      }));
+      
+      addValidationLog('G1: Sent game_init');
+      
+      // Wait for state to be set locally
+      const initialized = await waitForCondition(
+        () => gameState.version === 1 && gameState.gameId === initialGameId,
+        3000
+      );
+      
+      const duration = Date.now() - startTime;
+      
+      if (initialized && gameState.data) {
+        test.status = 'pass';
+        test.duration = duration;
+        test.versionEvolution = [1];
+        test.lastPatch = gameState.data;
+        test.metrics = {
+          version: gameState.version,
+          gameId: gameState.gameId,
+          stateKeys: Object.keys(gameState.data)
+        };
+        addValidationLog(`G1: PASS - Game initialized with version=1 in ${duration}ms`);
+      } else {
+        test.status = 'fail';
+        test.error = `Game not initialized (version: ${gameState.version}, gameId: ${gameState.gameId})`;
+        test.failureLogs = validationLogsRef.current.slice(-10);
+        addValidationLog(`G1: FAIL - ${test.error}`);
+      }
+    } catch (error) {
+      test.status = 'fail';
+      test.error = String(error);
+      test.failureLogs = validationLogsRef.current.slice(-10);
+      addValidationLog(`G1: FAIL - ${test.error}`);
+    }
+    
+    return test;
+  }
+
+  async function runTestG2(): Promise<TestScenario> {
+    const test: TestScenario = {
+      id: 'G2',
+      name: 'Event → State Mutation',
+      description: 'Guest submits game_event; Host broadcasts game_state{version++}',
+      timeout: 4000,
+      status: 'running',
+      versionEvolution: []
+    };
+    
+    const startTime = Date.now();
+    addValidationLog('G2: Testing event-driven state mutation...');
+    
+    try {
+      if (!gameState.gameId || gameState.version === 0) {
+        test.status = 'skipped';
+        test.error = 'No active game (run G1 first)';
+        addValidationLog('G2: SKIPPED - No active game');
+        return test;
+      }
+      
+      const initialVersion = gameState.version;
+      test.versionEvolution!.push(initialVersion);
+      
+      // Send game event (simulating guest or viewer action)
+      const eventPayload = { action: 'test_submit', data: 'G2_validation' };
+      sendGameEvent('player_action', eventPayload);
+      addValidationLog(`G2: Sent game_event from ${userId}`);
+      
+      // If we're the host, we need to manually update state in response
+      if (role === 'host') {
+        await wait(500); // Simulate processing delay
+        
+        wsRef.current?.send(JSON.stringify({
+          type: 'game_state',
+          streamId,
+          version: initialVersion + 1,
+          full: false,
+          patch: {
+            lastAction: eventPayload,
+            processed: true
+          }
+        }));
+        
+        addValidationLog('G2: Host broadcasted updated game_state');
+      }
+      
+      // Wait for version increment
+      const updated = await waitForCondition(
+        () => gameState.version > initialVersion,
+        3000
+      );
+      
+      const duration = Date.now() - startTime;
+      
+      if (updated) {
+        test.versionEvolution!.push(gameState.version);
+        test.status = 'pass';
+        test.duration = duration;
+        test.lastPatch = gameState.data;
+        test.metrics = {
+          initialVersion,
+          finalVersion: gameState.version,
+          versionIncrement: gameState.version - initialVersion
+        };
+        addValidationLog(`G2: PASS - State updated from v${initialVersion} to v${gameState.version} in ${duration}ms`);
+      } else {
+        test.status = 'fail';
+        test.error = `Version did not increment (still v${gameState.version})`;
+        test.failureLogs = validationLogsRef.current.slice(-10);
+        addValidationLog(`G2: FAIL - ${test.error}`);
+      }
+    } catch (error) {
+      test.status = 'fail';
+      test.error = String(error);
+      test.failureLogs = validationLogsRef.current.slice(-10);
+      addValidationLog(`G2: FAIL - ${test.error}`);
+    }
+    
+    return test;
+  }
+
+  async function runTestG3(): Promise<TestScenario> {
+    const test: TestScenario = {
+      id: 'G3',
+      name: 'Reconnect State Sync',
+      description: 'Disconnect mid-round; on WS reconnect, client gets full state',
+      timeout: 10000,
+      status: 'running',
+      versionEvolution: []
+    };
+    
+    const startTime = Date.now();
+    addValidationLog('G3: Testing state sync after reconnection...');
+    
+    try {
+      if (!gameState.gameId || gameState.version === 0) {
+        test.status = 'skipped';
+        test.error = 'No active game (run G1 first)';
+        addValidationLog('G3: SKIPPED - No active game');
+        return test;
+      }
+      
+      const versionBeforeDisconnect = gameState.version;
+      const gameIdBeforeDisconnect = gameState.gameId;
+      test.versionEvolution!.push(versionBeforeDisconnect);
+      
+      addValidationLog(`G3: Game at v${versionBeforeDisconnect} before disconnect`);
+      
+      // Force disconnect
+      if (wsRef.current) {
+        wsRef.current.close();
+        addValidationLog('G3: Forced WS close');
+      }
+      
+      // Wait for reconnection
+      const reconnected = await waitForCondition(
+        () => wsConnected === true,
+        8000
+      );
+      
+      if (!reconnected) {
+        test.status = 'fail';
+        test.error = 'Failed to reconnect within 8s';
+        test.failureLogs = validationLogsRef.current.slice(-10);
+        addValidationLog(`G3: FAIL - ${test.error}`);
+        return test;
+      }
+      
+      addValidationLog('G3: Reconnected to WS');
+      
+      // Wait for state sync (should receive game_state with current version)
+      const stateSynced = await waitForCondition(
+        () => gameState.gameId === gameIdBeforeDisconnect && gameState.version >= versionBeforeDisconnect,
+        3000
+      );
+      
+      const duration = Date.now() - startTime;
+      
+      if (stateSynced) {
+        test.versionEvolution!.push(gameState.version);
+        test.status = 'pass';
+        test.duration = duration;
+        test.lastPatch = gameState.data;
+        test.metrics = {
+          versionBeforeDisconnect,
+          versionAfterReconnect: gameState.version,
+          gameIdMatches: gameState.gameId === gameIdBeforeDisconnect
+        };
+        addValidationLog(`G3: PASS - State synced to v${gameState.version} after reconnect in ${duration}ms`);
+      } else {
+        test.status = 'fail';
+        test.error = `State not synced (expected game ${gameIdBeforeDisconnect} v${versionBeforeDisconnect}, got ${gameState.gameId} v${gameState.version})`;
+        test.failureLogs = validationLogsRef.current.slice(-10);
+        addValidationLog(`G3: FAIL - ${test.error}`);
+      }
+    } catch (error) {
+      test.status = 'fail';
+      test.error = String(error);
+      test.failureLogs = validationLogsRef.current.slice(-10);
+      addValidationLog(`G3: FAIL - ${test.error}`);
+    }
+    
+    return test;
+  }
+
+  async function runTestG4(): Promise<TestScenario> {
+    const test: TestScenario = {
+      id: 'G4',
+      name: 'Rate Limiting',
+      description: 'Spam game_event; server throttles and returns game_error',
+      timeout: 3000,
+      status: 'running'
+    };
+    
+    const startTime = Date.now();
+    addValidationLog('G4: Testing rate limiting...');
+    
+    try {
+      if (!gameState.gameId || gameState.version === 0) {
+        test.status = 'skipped';
+        test.error = 'No active game (run G1 first)';
+        addValidationLog('G4: SKIPPED - No active game');
+        return test;
+      }
+      
+      let errorReceived = false;
+      
+      // Set up temporary listener for game_error
+      const ws = wsRef.current;
+      if (!ws) {
+        test.status = 'fail';
+        test.error = 'WebSocket not connected';
+        test.failureLogs = validationLogsRef.current.slice(-10);
+        addValidationLog('G4: FAIL - No WebSocket connection');
+        return test;
+      }
+      
+      const originalHandler = ws.onmessage;
+      const errorPromise = new Promise<boolean>((resolve) => {
+        ws.onmessage = (event) => {
+          const msg = JSON.parse(event.data);
+          if (msg.type === 'game_error' && msg.error?.includes('rate limit')) {
+            errorReceived = true;
+            addValidationLog('G4: Received rate limit error from server');
+            resolve(true);
+          }
+          // Still call original handler
+          if (originalHandler) originalHandler.call(ws, event);
+        };
+        // Timeout
+        setTimeout(() => resolve(false), 2000);
+      });
+      
+      // Spam events (send 20 in rapid succession)
+      for (let i = 0; i < 20; i++) {
+        sendGameEvent('spam_action', { index: i });
+      }
+      
+      addValidationLog('G4: Sent 20 rapid game events');
+      
+      // Wait for error or timeout
+      const gotError = await errorPromise;
+      
+      // Restore original handler
+      if (ws && originalHandler) {
+        ws.onmessage = originalHandler;
+      }
+      
+      const duration = Date.now() - startTime;
+      
+      if (gotError || errorReceived) {
+        test.status = 'pass';
+        test.duration = duration;
+        test.metrics = {
+          eventsSent: 20,
+          rateLimitDetected: true
+        };
+        addValidationLog(`G4: PASS - Rate limiting enforced in ${duration}ms`);
+      } else {
+        test.status = 'fail';
+        test.error = 'No rate limit error received after spamming events';
+        test.failureLogs = validationLogsRef.current.slice(-10);
+        addValidationLog(`G4: FAIL - ${test.error}`);
+      }
+    } catch (error) {
+      test.status = 'fail';
+      test.error = String(error);
+      test.failureLogs = validationLogsRef.current.slice(-10);
+      addValidationLog(`G4: FAIL - ${test.error}`);
     }
     
     return test;
@@ -1801,10 +2378,31 @@ export default function TestHarness() {
       scenarios.push(await runTestH3());
       setCurrentTest(scenarios[scenarios.length - 1]);
       
+      scenarios.push(await runTestH4());
+      setCurrentTest(scenarios[scenarios.length - 1]);
+      
+      scenarios.push(await runTestH5());
+      setCurrentTest(scenarios[scenarios.length - 1]);
+      
       scenarios.push(await runTestR1());
       setCurrentTest(scenarios[scenarios.length - 1]);
       
+      scenarios.push(await runTestR2());
+      setCurrentTest(scenarios[scenarios.length - 1]);
+      
       scenarios.push(await runTestT1());
+      setCurrentTest(scenarios[scenarios.length - 1]);
+      
+      scenarios.push(await runTestG1());
+      setCurrentTest(scenarios[scenarios.length - 1]);
+      
+      scenarios.push(await runTestG2());
+      setCurrentTest(scenarios[scenarios.length - 1]);
+      
+      scenarios.push(await runTestG3());
+      setCurrentTest(scenarios[scenarios.length - 1]);
+      
+      scenarios.push(await runTestG4());
       setCurrentTest(scenarios[scenarios.length - 1]);
       
       const duration = Date.now() - startTime;
