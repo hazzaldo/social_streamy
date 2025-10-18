@@ -132,25 +132,51 @@ export class SessionManager {
   }
 }
 
-// Metrics tracker
+// Metrics tracker with label support
 export class MetricsTracker {
   private counters: Map<string, number> = new Map();
   private gauges: Map<string, number> = new Map();
   private histograms: Map<string, number[]> = new Map();
   
-  increment(metric: string, value: number = 1) {
-    this.counters.set(metric, (this.counters.get(metric) || 0) + value);
-  }
-  
-  setGauge(metric: string, value: number) {
-    this.gauges.set(metric, value);
-  }
-  
-  recordValue(metric: string, value: number) {
-    if (!this.histograms.has(metric)) {
-      this.histograms.set(metric, []);
+  // Helper to create metric key with labels
+  private makeKey(metric: string, labels?: Record<string, string>): string {
+    if (!labels || Object.keys(labels).length === 0) {
+      return metric;
     }
-    const values = this.histograms.get(metric)!;
+    const labelStr = Object.entries(labels)
+      .map(([k, v]) => `${k}="${v}"`)
+      .join(',');
+    return `${metric}{${labelStr}}`;
+  }
+  
+  increment(metric: string, labelsOrValue?: Record<string, string> | number, value: number = 1) {
+    // Support both increment(metric, value) and increment(metric, labels, value)
+    let labels: Record<string, string> | undefined;
+    let actualValue: number;
+    
+    if (typeof labelsOrValue === 'number') {
+      actualValue = labelsOrValue;
+      labels = undefined;
+    } else {
+      labels = labelsOrValue;
+      actualValue = value;
+    }
+    
+    const key = this.makeKey(metric, labels);
+    this.counters.set(key, (this.counters.get(key) || 0) + actualValue);
+  }
+  
+  setGauge(metric: string, value: number, labels?: Record<string, string>) {
+    const key = this.makeKey(metric, labels);
+    this.gauges.set(key, value);
+  }
+  
+  recordValue(metric: string, value: number, labels?: Record<string, string>) {
+    const key = this.makeKey(metric, labels);
+    if (!this.histograms.has(key)) {
+      this.histograms.set(key, []);
+    }
+    const values = this.histograms.get(key)!;
     values.push(value);
     
     // Keep only last 1000 values
@@ -162,32 +188,76 @@ export class MetricsTracker {
   getPrometheusFormat(): string {
     let output = '';
     
+    // Group metrics by base name for TYPE declarations
+    const metricTypes = new Map<string, Set<string>>();
+    
+    for (const key of Array.from(this.counters.keys())) {
+      const baseName = key.split('{')[0];
+      if (!metricTypes.has(baseName)) {
+        metricTypes.set(baseName, new Set());
+      }
+      metricTypes.get(baseName)!.add(key);
+    }
+    
     // Counters
-    for (const [name, value] of Array.from(this.counters.entries())) {
-      output += `# TYPE ${name} counter\n`;
-      output += `${name} ${value}\n\n`;
+    for (const [baseName, keys] of Array.from(metricTypes.entries())) {
+      output += `# TYPE ${baseName} counter\n`;
+      for (const key of Array.from(keys)) {
+        const value = this.counters.get(key) || 0;
+        output += `${key} ${value}\n`;
+      }
+      output += '\n';
     }
     
     // Gauges
-    for (const [name, value] of Array.from(this.gauges.entries())) {
-      output += `# TYPE ${name} gauge\n`;
-      output += `${name} ${value}\n\n`;
+    const gaugeTypes = new Map<string, Set<string>>();
+    for (const key of Array.from(this.gauges.keys())) {
+      const baseName = key.split('{')[0];
+      if (!gaugeTypes.has(baseName)) {
+        gaugeTypes.set(baseName, new Set());
+      }
+      gaugeTypes.get(baseName)!.add(key);
+    }
+    
+    for (const [baseName, keys] of Array.from(gaugeTypes.entries())) {
+      output += `# TYPE ${baseName} gauge\n`;
+      for (const key of Array.from(keys)) {
+        const value = this.gauges.get(key) || 0;
+        output += `${key} ${value}\n`;
+      }
+      output += '\n';
     }
     
     // Histograms (calculate percentiles)
-    for (const [name, values] of Array.from(this.histograms.entries())) {
-      if (values.length === 0) continue;
-      
-      const sorted = [...values].sort((a, b) => a - b);
-      const p50 = sorted[Math.floor(sorted.length * 0.5)];
-      const p95 = sorted[Math.floor(sorted.length * 0.95)];
-      const p99 = sorted[Math.floor(sorted.length * 0.99)];
-      
-      output += `# TYPE ${name} summary\n`;
-      output += `${name}{quantile="0.5"} ${p50}\n`;
-      output += `${name}{quantile="0.95"} ${p95}\n`;
-      output += `${name}{quantile="0.99"} ${p99}\n`;
-      output += `${name}_count ${values.length}\n\n`;
+    const histogramTypes = new Map<string, Set<string>>();
+    for (const key of Array.from(this.histograms.keys())) {
+      const baseName = key.split('{')[0];
+      if (!histogramTypes.has(baseName)) {
+        histogramTypes.set(baseName, new Set());
+      }
+      histogramTypes.get(baseName)!.add(key);
+    }
+    
+    for (const [baseName, keys] of Array.from(histogramTypes.entries())) {
+      output += `# TYPE ${baseName} summary\n`;
+      for (const key of Array.from(keys)) {
+        const values = this.histograms.get(key) || [];
+        if (values.length === 0) continue;
+        
+        const sorted = [...values].sort((a, b) => a - b);
+        const p50 = sorted[Math.floor(sorted.length * 0.5)];
+        const p95 = sorted[Math.floor(sorted.length * 0.95)];
+        const p99 = sorted[Math.floor(sorted.length * 0.99)];
+        
+        const labelPart = key.includes('{') ? key.substring(key.indexOf('{')) : '';
+        const metricName = key.split('{')[0];
+        
+        output += `${metricName}${labelPart.slice(0, -1)},quantile="0.5"} ${p50}\n`;
+        output += `${metricName}${labelPart.slice(0, -1)},quantile="0.95"} ${p95}\n`;
+        output += `${metricName}${labelPart.slice(0, -1)},quantile="0.99"} ${p99}\n`;
+        output += `${metricName}_count${labelPart} ${values.length}\n`;
+      }
+      output += '\n';
     }
     
     return output;
