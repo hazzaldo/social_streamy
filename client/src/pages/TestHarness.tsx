@@ -107,6 +107,10 @@ export default function TestHarness() {
   const viewerHostStreamIdRef = useRef<string | null>(null);
   const viewerGuestStreamIdRef = useRef<string | null>(null);
   const roleRef = useRef<Role>(role);
+  
+  // Reliability & Telemetry: ICE restart tracking
+  const disconnectionTimers = useRef<Map<string, NodeJS.Timeout>>(new Map());
+  const iceRestartInProgress = useRef<Set<string>>(new Set());
 
   // Update roleRef whenever role changes
   useEffect(() => {
@@ -371,6 +375,9 @@ export default function TestHarness() {
     const local = await ensureLocalTracks();
     const pc = new RTCPeerConnection(ICE_CONFIG);
     hostPcByViewer.current.set(viewerId, pc);
+    
+    // Setup connection state monitoring for ICE restart
+    setupConnectionStateMonitoring(pc, viewerId);
 
     // Add Host tracks
     local.getTracks().forEach(t => pc.addTrack(t, local));
@@ -393,10 +400,6 @@ export default function TestHarness() {
         };
         wsRef.current.send(JSON.stringify(msg));
       }
-    };
-
-    pc.onconnectionstatechange = () => {
-      console.log('🧭 host pc state', viewerId, pc.connectionState);
     };
 
     const offer = await pc.createOffer({
@@ -429,6 +432,9 @@ export default function TestHarness() {
     if (!pc) {
       pc = new RTCPeerConnection(ICE_CONFIG);
       viewerPcRef.current = pc;
+      
+      // Setup connection state monitoring for ICE restart
+      setupConnectionStateMonitoring(pc, 'viewer-pc');
       pc.ontrack = ev => {
         // Phase 3: Viewers receive multiple streams (Host + Guest)
         if (ev.streams.length === 0) {
@@ -502,6 +508,9 @@ export default function TestHarness() {
     if (!pc) {
       pc = new RTCPeerConnection(ICE_CONFIG);
       hostPcByViewer.current.set(msg.fromUserId, pc);
+      
+      // Setup connection state monitoring for ICE restart
+      setupConnectionStateMonitoring(pc, msg.fromUserId);
 
       // Host sends tracks to Guest
       local.getTracks().forEach(t => pc!.addTrack(t, local));
@@ -528,9 +537,6 @@ export default function TestHarness() {
         }
       };
 
-      pc.onconnectionstatechange = () => {
-        console.log('🧭 Host-Guest pc state:', pc!.connectionState);
-      };
     }
 
     await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
@@ -554,6 +560,9 @@ export default function TestHarness() {
     const local = await ensureLocalTracks();
     const pc = new RTCPeerConnection(ICE_CONFIG);
     guestPcRef.current = pc;
+    
+    // Setup connection state monitoring for ICE restart
+    setupConnectionStateMonitoring(pc, 'guest-to-host');
 
     // Guest sends their tracks to Host
     local.getTracks().forEach(t => pc.addTrack(t, local));
@@ -577,10 +586,6 @@ export default function TestHarness() {
         };
         wsRef.current.send(JSON.stringify(msg));
       }
-    };
-
-    pc.onconnectionstatechange = () => {
-      console.log('🧭 Guest pc state:', pc.connectionState);
     };
 
     const offer = await pc.createOffer({
@@ -652,6 +657,131 @@ export default function TestHarness() {
     wsRef.current?.close();
     wsRef.current = null;
   }
+
+  // Reliability & Telemetry: ICE restart on connection failure
+  function setupConnectionStateMonitoring(pc: RTCPeerConnection, connectionId: string) {
+    pc.onconnectionstatechange = () => {
+      const state = pc.connectionState;
+      console.log(`🔌 Connection ${connectionId} state: ${state}`);
+
+      if (state === 'connected') {
+        // Clear any pending disconnection timer
+        const timer = disconnectionTimers.current.get(connectionId);
+        if (timer) {
+          clearTimeout(timer);
+          disconnectionTimers.current.delete(connectionId);
+        }
+        iceRestartInProgress.current.delete(connectionId);
+      }
+
+      if (state === 'disconnected') {
+        // Start 5s timer before attempting ICE restart
+        if (!disconnectionTimers.current.has(connectionId)) {
+          const timer = setTimeout(() => {
+            console.log(`⚠️ Connection ${connectionId} disconnected for >5s, attempting ICE restart`);
+            handleIceRestart(pc, connectionId);
+          }, 5000);
+          disconnectionTimers.current.set(connectionId, timer);
+        }
+      }
+
+      if (state === 'failed') {
+        console.log(`❌ Connection ${connectionId} failed, attempting immediate ICE restart`);
+        handleIceRestart(pc, connectionId);
+      }
+
+      if (state === 'closed') {
+        // Clean up timers
+        const timer = disconnectionTimers.current.get(connectionId);
+        if (timer) {
+          clearTimeout(timer);
+          disconnectionTimers.current.delete(connectionId);
+        }
+        iceRestartInProgress.current.delete(connectionId);
+      }
+    };
+  }
+
+  async function handleIceRestart(pc: RTCPeerConnection, connectionId: string) {
+    if (iceRestartInProgress.current.has(connectionId)) {
+      console.log(`⏳ ICE restart already in progress for ${connectionId}`);
+      return;
+    }
+
+    iceRestartInProgress.current.add(connectionId);
+    console.log(`🔄 Initiating ICE restart for ${connectionId}`);
+
+    try {
+      // Perform ICE restart by creating new offer with iceRestart: true
+      const offer = await pc.createOffer({ iceRestart: true });
+      await pc.setLocalDescription(offer);
+
+      // Send the new offer based on role and connection type
+      const currentRole = roleRef.current;
+      
+      if (currentRole === 'host') {
+        // Host restarting connection to a viewer
+        wsRef.current?.send(JSON.stringify({
+          type: 'webrtc_offer',
+          toUserId: connectionId,
+          fromUserId: userId,
+          sdp: offer
+        }));
+      } else if (currentRole === 'guest' && connectionId === 'guest-to-host') {
+        // Guest restarting connection to host (uses same webrtc_offer as initial negotiation)
+        wsRef.current?.send(JSON.stringify({
+          type: 'webrtc_offer',
+          streamId,
+          fromUserId: userId,
+          toUserId: 'host',
+          sdp: offer
+        }));
+      } else if (currentRole === 'viewer' && connectionId === 'viewer-pc') {
+        // Viewer can't initiate restart, wait for host
+        console.log('Viewer waiting for Host to restart connection');
+      }
+
+      console.log(`✅ ICE restart offer sent for ${connectionId}`);
+    } catch (error) {
+      console.error(`❌ ICE restart failed for ${connectionId}:`, error);
+      iceRestartInProgress.current.delete(connectionId);
+    }
+  }
+
+  // Network change detection
+  useEffect(() => {
+    const connection = (navigator as any).connection;
+    if (!connection) return;
+
+    const handleNetworkChange = () => {
+      console.log('🌐 Network change detected, triggering guarded ICE restart');
+      
+      // Restart all active peer connections with a 1s delay (guarded)
+      setTimeout(() => {
+        if (roleRef.current === 'host') {
+          hostPcByViewer.current.forEach((pc, viewerId) => {
+            if (!iceRestartInProgress.current.has(viewerId)) {
+              handleIceRestart(pc, viewerId);
+            }
+          });
+        }
+        
+        if (roleRef.current === 'guest' && guestPcRef.current) {
+          if (!iceRestartInProgress.current.has('guest-to-host')) {
+            handleIceRestart(guestPcRef.current, 'guest-to-host');
+          }
+        }
+        
+        if (roleRef.current === 'viewer' && viewerPcRef.current) {
+          // Viewers wait for host to restart
+          console.log('Viewer: waiting for host to restart after network change');
+        }
+      }, 1000);
+    };
+
+    connection.addEventListener('change', handleNetworkChange);
+    return () => connection.removeEventListener('change', handleNetworkChange);
+  }, [userId, streamId]);
 
   // Phase 4: Viewer requests to become cohost
   function requestCohost() {
