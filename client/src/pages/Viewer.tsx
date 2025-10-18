@@ -56,6 +56,7 @@ export default function Viewer() {
   const [gameInput, setGameInput] = useState('');
   const [autoplayBlocked, setAutoplayBlocked] = useState(false);
   const [isMuted, setIsMuted] = useState(true);
+  const [isReconnecting, setIsReconnecting] = useState(false);
   
   const hostVideoRef = useRef<HTMLVideoElement | null>(null);
   const guestVideoRef = useRef<HTMLVideoElement | null>(null);
@@ -302,12 +303,72 @@ export default function Viewer() {
     };
   }, [isJoined, streamId, userId]);
 
+  // Network change handling - trigger recovery on network events
+  useEffect(() => {
+    if (!isJoined) return;
+    
+    const handleOnline = () => {
+      console.log('🌐 Network came online');
+      toast({
+        title: 'Network Restored',
+        description: 'Reconnecting to stream...',
+      });
+      
+      // Trigger recovery for active connections
+      if (hostPcRef.current && hostPcRef.current.connectionState !== 'connected') {
+        attemptRecovery('host', hostPcRef.current);
+      }
+      
+      if (guestPcRef.current && guestPcRef.current.connectionState !== 'connected') {
+        attemptRecovery('guest', guestPcRef.current);
+      }
+    };
+    
+    const handleOffline = () => {
+      console.log('🌐 Network went offline');
+      setIsReconnecting(true);
+    };
+    
+    const handleNetworkChange = () => {
+      console.log('🌐 Network type changed');
+      // Trigger ICE restart for all connections when network type changes
+      if (hostPcRef.current) {
+        attemptRecovery('host', hostPcRef.current);
+      }
+      
+      if (guestPcRef.current) {
+        attemptRecovery('guest', guestPcRef.current);
+      }
+    };
+    
+    // Listen for online/offline events
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    
+    // Listen for network type changes (if available)
+    const connection = (navigator as any).connection || (navigator as any).mozConnection || (navigator as any).webkitConnection;
+    if (connection) {
+      connection.addEventListener('change', handleNetworkChange);
+    }
+    
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+      if (connection) {
+        connection.removeEventListener('change', handleNetworkChange);
+      }
+    };
+  }, [isJoined]);
+
   /**
    * Attempt connection recovery with exponential backoff (2s, 4s, 8s)
    * Max 3 attempts before giving up
    */
   function attemptRecovery(connectionId: string, pc: RTCPeerConnection) {
     const attempts = recoveryAttempts.current.get(connectionId) || 0;
+    
+    // Set reconnecting UI state
+    setIsReconnecting(true);
     
     // Clear any pending recovery timeout
     const existingTimeout = recoveryTimeouts.current.get(connectionId);
@@ -320,6 +381,11 @@ export default function Viewer() {
       console.log(`❌ Connection recovery failed after 3 attempts: ${connectionId}`);
       recoveryAttempts.current.delete(connectionId);
       recoveryTimeouts.current.delete(connectionId);
+      
+      // Only clear reconnecting state if no other connections are recovering
+      if (recoveryAttempts.current.size === 0) {
+        setIsReconnecting(false);
+      }
       
       toast({
         title: 'Connection Lost',
@@ -363,6 +429,11 @@ export default function Viewer() {
     }
     recoveryAttempts.current.delete(connectionId);
     recoveryTimeouts.current.delete(connectionId);
+    
+    // Clear reconnecting UI state if no other connections are recovering
+    if (recoveryAttempts.current.size === 0) {
+      setIsReconnecting(false);
+    }
   }
 
   async function handleHostOffer(sdp: RTCSessionDescriptionInit, metadata?: { hostStreamId?: string; guestStreamId?: string }) {
@@ -622,6 +693,13 @@ export default function Viewer() {
 
   return (
     <div className="min-h-screen bg-background p-4">
+      {/* Reconnecting Banner */}
+      {isReconnecting && (
+        <div className="fixed top-0 left-0 right-0 bg-yellow-500 text-yellow-950 px-4 py-2 text-center font-medium z-50" data-testid="banner-reconnecting">
+          🔄 Reconnecting to stream...
+        </div>
+      )}
+      
       <div className="max-w-4xl mx-auto space-y-4">
         <div className="flex items-center justify-between">
           <h1 className="text-2xl font-bold">Watch Stream</h1>

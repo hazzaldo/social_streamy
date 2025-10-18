@@ -48,6 +48,7 @@ export default function Host() {
   const [wsConnected, setWsConnected] = useState(false);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [viewerCount, setViewerCount] = useState(0);
+  const [isReconnecting, setIsReconnecting] = useState(false);
   
   // Co-host state
   const [cohostQueue, setCohostQueue] = useState<Array<{ userId: string; timestamp: number }>>([]);
@@ -224,12 +225,78 @@ export default function Host() {
     };
   }, [isLive, streamId, userId]);
 
+  // Network change handling - trigger recovery on network events
+  useEffect(() => {
+    if (!isLive) return;
+    
+    const handleOnline = () => {
+      console.log('🌐 Network came online');
+      toast({
+        title: 'Network Restored',
+        description: 'Reconnecting to stream...',
+      });
+      
+      // Trigger recovery for all active connections
+      viewerPcs.current.forEach((pc, viewerUserId) => {
+        if (pc.connectionState !== 'connected') {
+          const qualityManager = qualityManagers.current.get(viewerUserId);
+          attemptRecovery(`viewer-${viewerUserId}`, pc, qualityManager);
+        }
+      });
+      
+      if (guestPcRef.current && guestPcRef.current.connectionState !== 'connected') {
+        const qualityManager = qualityManagers.current.get('guest');
+        attemptRecovery('guest', guestPcRef.current, qualityManager);
+      }
+    };
+    
+    const handleOffline = () => {
+      console.log('🌐 Network went offline');
+      setIsReconnecting(true);
+    };
+    
+    const handleNetworkChange = () => {
+      console.log('🌐 Network type changed');
+      // Trigger ICE restart for all connections when network type changes
+      viewerPcs.current.forEach((pc, viewerUserId) => {
+        const qualityManager = qualityManagers.current.get(viewerUserId);
+        attemptRecovery(`viewer-${viewerUserId}`, pc, qualityManager);
+      });
+      
+      if (guestPcRef.current) {
+        const qualityManager = qualityManagers.current.get('guest');
+        attemptRecovery('guest', guestPcRef.current, qualityManager);
+      }
+    };
+    
+    // Listen for online/offline events
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    
+    // Listen for network type changes (if available)
+    const connection = (navigator as any).connection || (navigator as any).mozConnection || (navigator as any).webkitConnection;
+    if (connection) {
+      connection.addEventListener('change', handleNetworkChange);
+    }
+    
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+      if (connection) {
+        connection.removeEventListener('change', handleNetworkChange);
+      }
+    };
+  }, [isLive]);
+
   /**
    * Attempt connection recovery with exponential backoff (2s, 4s, 8s)
    * Max 3 attempts before giving up
    */
   function attemptRecovery(connectionId: string, pc: RTCPeerConnection, qualityManager?: AdaptiveQualityManager) {
     const attempts = recoveryAttempts.current.get(connectionId) || 0;
+    
+    // Set reconnecting UI state
+    setIsReconnecting(true);
     
     // Clear any pending recovery timeout
     const existingTimeout = recoveryTimeouts.current.get(connectionId);
@@ -242,6 +309,11 @@ export default function Host() {
       console.log(`❌ Connection recovery failed after 3 attempts: ${connectionId}`);
       recoveryAttempts.current.delete(connectionId);
       recoveryTimeouts.current.delete(connectionId);
+      
+      // Only clear reconnecting state if no other connections are recovering
+      if (recoveryAttempts.current.size === 0) {
+        setIsReconnecting(false);
+      }
       
       toast({
         title: 'Connection Lost',
@@ -285,6 +357,11 @@ export default function Host() {
     }
     recoveryAttempts.current.delete(connectionId);
     recoveryTimeouts.current.delete(connectionId);
+    
+    // Clear reconnecting UI state if no other connections are recovering
+    if (recoveryAttempts.current.size === 0) {
+      setIsReconnecting(false);
+    }
   }
 
   async function createViewerConnection(viewerUserId: string) {
@@ -808,6 +885,13 @@ export default function Host() {
 
   return (
     <div className="min-h-screen bg-background p-4">
+      {/* Reconnecting Banner */}
+      {isReconnecting && (
+        <div className="fixed top-0 left-0 right-0 bg-yellow-500 text-yellow-950 px-4 py-2 text-center font-medium z-50" data-testid="banner-reconnecting">
+          🔄 Reconnecting to stream...
+        </div>
+      )}
+      
       <div className="max-w-4xl mx-auto space-y-4">
         <div className="flex items-center justify-between">
           <h1 className="text-2xl font-bold">Host Stream</h1>
