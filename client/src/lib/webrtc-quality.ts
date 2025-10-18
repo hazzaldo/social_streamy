@@ -42,6 +42,27 @@ export function detectSafariIOS(): boolean {
 }
 
 /**
+ * Detect if browser supports scalability mode (SVC)
+ * Chrome/Edge support it, Safari/iOS do not
+ * 
+ * Note: Chrome UA contains "Safari", so we need to check for Chrome/Chromium first
+ */
+export function supportsScalabilityMode(): boolean {
+  const ua = navigator.userAgent;
+  
+  // Check if running on iOS (no SVC support)
+  if (detectSafariIOS()) {
+    return false;
+  }
+  
+  // Chrome/Chromium/Edge support scalability mode
+  // Check for Chrome/Chromium first before Safari (since Chrome UA includes "Safari")
+  const isChromium = /Chrome|Chromium|Edg|HeadlessChrome/.test(ua);
+  
+  return isChromium;
+}
+
+/**
  * Get preferred codec list based on platform
  * iOS/Safari: H.264 only (best compatibility)
  * Other: VP9 preferred, H.264 fallback
@@ -135,6 +156,7 @@ export const BITRATE_PROFILES: Record<QualityProfile, BitrateProfile> = {
 
 /**
  * Apply bitrate profile to all video senders
+ * Includes scalabilityMode for Chrome/Edge with VP9/AV1
  */
 export async function applyBitrateProfile(
   pc: RTCPeerConnection,
@@ -142,6 +164,7 @@ export async function applyBitrateProfile(
 ): Promise<void> {
   const senders = pc.getSenders();
   const config = BITRATE_PROFILES[profile];
+  const useScalabilityMode = supportsScalabilityMode();
 
   for (const sender of senders) {
     if (sender.track?.kind === 'video') {
@@ -155,9 +178,19 @@ export async function applyBitrateProfile(
       params.encodings[0].maxFramerate = config.maxFramerate;
       params.encodings[0].scaleResolutionDownBy = config.scaleResolutionDownBy;
 
+      // Add scalability mode for Chrome/Edge (L1T3 = 1 spatial layer, 3 temporal layers)
+      // This provides better quality under bandwidth fluctuations
+      // Only for VP9/AV1, not H.264 (iOS uses H.264 which doesn't support SVC)
+      if (useScalabilityMode) {
+        (params.encodings[0] as any).scalabilityMode = 'L1T3';
+      }
+
       try {
         await sender.setParameters(params);
-        console.log(`✅ Applied ${profile} profile to sender:`, config);
+        console.log(`✅ Applied ${profile} profile to sender:`, {
+          ...config,
+          scalabilityMode: useScalabilityMode ? 'L1T3' : 'none'
+        });
       } catch (err) {
         console.warn(`⚠️  Failed to set sender parameters:`, err);
       }
@@ -167,11 +200,13 @@ export async function applyBitrateProfile(
 
 /**
  * Apply audio OPUS quality settings
+ * Audio-first strategy: prioritize audio on degraded connections
  */
 export async function applyAudioQuality(
   pc: RTCPeerConnection,
-  maxBitrate: number = 96000,  // 64-96kbps
-  priority: RTCPriorityType = 'high'
+  maxBitrate: number = 96000,  // 64-96kbps for talking-head
+  priority: RTCPriorityType = 'high',
+  ptime: number = 20  // 20ms packet time
 ): Promise<void> {
   const senders = pc.getSenders();
 
@@ -185,14 +220,41 @@ export async function applyAudioQuality(
 
       params.encodings[0].maxBitrate = maxBitrate;
       params.encodings[0].priority = priority;
+      
+      // Set ptime (packet time) for OPUS - 20ms is optimal for voice
+      if ('ptime' in params.encodings[0]) {
+        (params.encodings[0] as any).ptime = ptime;
+      }
 
       try {
         await sender.setParameters(params);
-        console.log(`✅ Applied audio quality: ${maxBitrate}bps, priority: ${priority}`);
+        console.log(`✅ Applied audio quality: ${maxBitrate}bps, priority: ${priority}, ptime: ${ptime}ms`);
       } catch (err) {
         console.warn(`⚠️  Failed to set audio parameters:`, err);
       }
     }
+  }
+}
+
+/**
+ * Raise audio priority on degraded connection (audio-first strategy)
+ * Temporarily prioritize audio and allow video to scale down
+ */
+export async function raiseAudioPriorityOnDegraded(
+  pc: RTCPeerConnection,
+  isDegraded: boolean
+): Promise<void> {
+  if (isDegraded) {
+    // Keep audio at high priority and use maintain-framerate for video
+    // This allows video quality to drop while maintaining audio clarity
+    await applyAudioQuality(pc, 96000, 'high');
+    setDegradationPreference(pc, 'maintain-framerate'); // Prefer smooth video over resolution
+    console.log('🔊 Audio-first mode activated (degraded connection)');
+  } else {
+    // Restore balanced degradation
+    await applyAudioQuality(pc, 96000, 'high');
+    setDegradationPreference(pc, 'balanced');
+    console.log('🔊 Audio priority restored to normal');
   }
 }
 
@@ -246,23 +308,66 @@ export function setContentHint(
 
 /**
  * Request a keyframe from receiver (Chrome/Edge only)
+ * Fallback to sender.generateKeyFrame() on Chromium
+ * 
+ * Use after:
+ * - Guest approved / joined
+ * - Renegotiation complete
+ * - Network recovered
+ * - Viewer joins
  */
 export function requestKeyFrame(pc: RTCPeerConnection): void {
+  let keyframeRequested = false;
   const receivers = pc.getReceivers();
   
+  // Try receiver.requestKeyFrame() first (preferred)
   for (const receiver of receivers) {
     if (receiver.track?.kind === 'video') {
-      // requestKeyFrame not in types but supported in Chrome
       if (typeof (receiver as any).requestKeyFrame === 'function') {
         try {
           (receiver as any).requestKeyFrame();
-          console.log('🔑 Keyframe requested');
+          console.log('🔑 Keyframe requested from receiver');
+          keyframeRequested = true;
         } catch (err) {
-          console.warn('⚠️  Keyframe request failed:', err);
+          console.warn('⚠️  Receiver keyframe request failed:', err);
         }
       }
     }
   }
+
+  // Fallback to sender.generateKeyFrame() on Chromium
+  if (!keyframeRequested) {
+    const senders = pc.getSenders();
+    for (const sender of senders) {
+      if (sender.track?.kind === 'video') {
+        if (typeof (sender as any).generateKeyFrame === 'function') {
+          try {
+            (sender as any).generateKeyFrame();
+            console.log('🔑 Keyframe generated from sender (fallback)');
+            keyframeRequested = true;
+          } catch (err) {
+            console.warn('⚠️  Sender keyframe generation failed:', err);
+          }
+        }
+      }
+    }
+  }
+
+  if (!keyframeRequested) {
+    console.warn('⚠️  Keyframe request not supported on this platform');
+  }
+}
+
+/**
+ * Request keyframe on connection recovery
+ * Triggers faster first-frame after network events
+ */
+export function requestKeyFrameOnRecovery(
+  pc: RTCPeerConnection,
+  reason: 'guest_joined' | 'renegotiation' | 'network_recovered' | 'viewer_joined'
+): void {
+  console.log(`🔑 Requesting keyframe: ${reason}`);
+  requestKeyFrame(pc);
 }
 
 // ============================================================================
@@ -283,11 +388,12 @@ export class AdaptiveQualityManager {
   private pc: RTCPeerConnection;
   private state: QualityManagerState;
   private intervalId?: number;
+  private lastFps: number = 0;
 
-  // Adaptation thresholds
+  // Adaptation thresholds - smarter rules for stability
   private readonly DEGRADE_THRESHOLD = 3;   // 3 ticks (~6s) of degraded
-  private readonly UPGRADE_THRESHOLD = 5;   // 5 ticks (~10s) of good
-  private readonly MIN_CHANGE_INTERVAL = 5000; // Min 5s between changes
+  private readonly UPGRADE_THRESHOLD = 7;   // 7 ticks (~14s) of good (10-15s range)
+  private readonly MIN_DWELL_TIME = 8000;   // Min 8s dwell before next change (prevents ping-pong)
 
   constructor(pc: RTCPeerConnection, initialProfile: QualityProfile = 'high') {
     this.pc = pc;
@@ -304,8 +410,9 @@ export class AdaptiveQualityManager {
    * Update health status and adapt quality if needed
    * Call this from your existing health telemetry system
    */
-  updateHealth(health: HealthStatus, packetLoss: number = 0): void {
+  updateHealth(health: HealthStatus, packetLoss: number = 0, fps: number = 0): void {
     this.state.healthStatus = health;
+    this.lastFps = fps;
 
     const now = Date.now();
     const timeSinceLastChange = now - this.state.lastProfileChange;
@@ -315,10 +422,10 @@ export class AdaptiveQualityManager {
       this.state.degradedTicks++;
       this.state.goodTicks = 0;
 
-      // Degrade after threshold
+      // Downshift after 3 consecutive bad ticks (≈6s) with min 8s dwell
       if (
         this.state.degradedTicks >= this.DEGRADE_THRESHOLD &&
-        timeSinceLastChange > this.MIN_CHANGE_INTERVAL
+        timeSinceLastChange >= this.MIN_DWELL_TIME
       ) {
         this.downgradeQuality();
       }
@@ -326,11 +433,12 @@ export class AdaptiveQualityManager {
       this.state.goodTicks++;
       this.state.degradedTicks = 0;
 
-      // Upgrade after threshold and low packet loss
+      // Upshift after 10-15s good + loss <2% and fps ≥ 28 with min 8s dwell
       if (
         this.state.goodTicks >= this.UPGRADE_THRESHOLD &&
         packetLoss < 0.02 &&
-        timeSinceLastChange > this.MIN_CHANGE_INTERVAL
+        fps >= 28 &&
+        timeSinceLastChange >= this.MIN_DWELL_TIME
       ) {
         this.upgradeQuality();
       }
@@ -344,7 +452,7 @@ export class AdaptiveQualityManager {
   /**
    * Downgrade to next lower quality profile
    */
-  private downgradeQuality(): void {
+  private async downgradeQuality(): Promise<void> {
     const profiles: QualityProfile[] = ['high', 'medium', 'low'];
     const currentIndex = profiles.indexOf(this.state.currentProfile);
     
@@ -353,7 +461,11 @@ export class AdaptiveQualityManager {
       this.state.lastProfileChange = Date.now();
       this.state.degradedTicks = 0;
       
-      applyBitrateProfile(this.pc, this.state.currentProfile);
+      await applyBitrateProfile(this.pc, this.state.currentProfile);
+      
+      // Audio-first strategy: prioritize audio when degraded
+      await raiseAudioPriorityOnDegraded(this.pc, true);
+      
       console.log(`📉 Quality downgraded to: ${this.state.currentProfile}`);
     }
   }
@@ -361,7 +473,7 @@ export class AdaptiveQualityManager {
   /**
    * Upgrade to next higher quality profile
    */
-  private upgradeQuality(): void {
+  private async upgradeQuality(): Promise<void> {
     const profiles: QualityProfile[] = ['high', 'medium', 'low'];
     const currentIndex = profiles.indexOf(this.state.currentProfile);
     
@@ -370,7 +482,11 @@ export class AdaptiveQualityManager {
       this.state.lastProfileChange = Date.now();
       this.state.goodTicks = 0;
       
-      applyBitrateProfile(this.pc, this.state.currentProfile);
+      await applyBitrateProfile(this.pc, this.state.currentProfile);
+      
+      // Restore normal audio priority when upgraded
+      await raiseAudioPriorityOnDegraded(this.pc, false);
+      
       console.log(`📈 Quality upgraded to: ${this.state.currentProfile}`);
     }
   }
@@ -408,7 +524,117 @@ export class AdaptiveQualityManager {
 }
 
 // ============================================================================
-// 7. iPhone/Safari Guards
+// 7. Scene-Based Profiles
+// ============================================================================
+
+export type SceneProfile = 'talking-head' | 'screen-share' | 'data-saver';
+
+export interface SceneConstraints {
+  video: MediaTrackConstraints;
+  audio: MediaTrackConstraints;
+  bitrateProfile: QualityProfile;
+  contentHint: 'motion' | 'detail' | 'text';
+  degradationPreference: RTCDegradationPreference;
+  maxBitrateCap?: number;
+}
+
+/**
+ * Scene-based profile configurations
+ */
+export const SCENE_PROFILES: Record<SceneProfile, SceneConstraints> = {
+  'talking-head': {
+    video: {
+      width: { ideal: 1280, max: 1280 },
+      height: { ideal: 720, max: 720 },
+      frameRate: { ideal: 30, max: 30 }
+    },
+    audio: {
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true
+    },
+    bitrateProfile: 'high',
+    contentHint: 'motion',
+    degradationPreference: 'balanced'
+  },
+  'screen-share': {
+    video: {
+      width: { ideal: 1920, max: 1920 },
+      height: { ideal: 1080, max: 1080 },
+      frameRate: { ideal: 15, max: 24 }
+    },
+    audio: {
+      echoCancellation: true,
+      noiseSuppression: false,  // Preserve audio fidelity for presentations
+      autoGainControl: false
+    },
+    bitrateProfile: 'high',
+    contentHint: 'text',
+    degradationPreference: 'maintain-resolution'
+  },
+  'data-saver': {
+    video: {
+      width: { ideal: 640, max: 640 },
+      height: { ideal: 360, max: 360 },
+      frameRate: { ideal: 24, max: 24 }
+    },
+    audio: {
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true
+    },
+    bitrateProfile: 'medium',
+    contentHint: 'motion',
+    degradationPreference: 'maintain-framerate',
+    maxBitrateCap: 1_000_000  // Cap High at 1 Mbps, start at Medium
+  }
+};
+
+/**
+ * Apply scene-based profile to peer connection
+ * Switch profiles without renegotiation using setParameters
+ */
+export async function applySceneProfile(
+  pc: RTCPeerConnection,
+  localStream: MediaStream,
+  scene: SceneProfile
+): Promise<void> {
+  const config = SCENE_PROFILES[scene];
+  
+  // Apply bitrate profile
+  await applyBitrateProfile(pc, config.bitrateProfile);
+  
+  // Apply bitrate cap for data-saver
+  if (scene === 'data-saver' && config.maxBitrateCap) {
+    const senders = pc.getSenders();
+    for (const sender of senders) {
+      if (sender.track?.kind === 'video') {
+        const params = sender.getParameters();
+        if (params.encodings && params.encodings[0]) {
+          // Cap maximum bitrate
+          params.encodings[0].maxBitrate = Math.min(
+            params.encodings[0].maxBitrate || config.maxBitrateCap,
+            config.maxBitrateCap
+          );
+          await sender.setParameters(params);
+        }
+      }
+    }
+  }
+  
+  // Set content hint on video tracks
+  localStream.getVideoTracks().forEach(track => {
+    setContentHint(track, config.contentHint);
+  });
+  
+  // Set degradation preference
+  setDegradationPreference(pc, config.degradationPreference);
+  
+  console.log(`✅ Applied scene profile: ${scene}`, config);
+}
+
+// ============================================================================
+// 8. iPhone/Safari Guards
 // ============================================================================
 
 /**
@@ -557,9 +783,9 @@ export function startHealthMonitoring(
         }
       });
 
-      // Calculate health and update quality manager
+      // Calculate health and update quality manager with FPS
       const health = calculateHealth(currentStats);
-      qualityManager.updateHealth(health, currentStats.packetLoss);
+      qualityManager.updateHealth(health, currentStats.packetLoss, currentStats.frameRate);
 
     } catch (err) {
       console.warn('⚠️  Health monitoring error:', err);

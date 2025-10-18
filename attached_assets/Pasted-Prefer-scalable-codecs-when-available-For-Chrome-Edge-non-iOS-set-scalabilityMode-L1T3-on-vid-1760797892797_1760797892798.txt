@@ -1,0 +1,63 @@
+Prefer scalable codecs when available
+
+For Chrome/Edge (non-iOS), set scalabilityMode: "L1T3" on video encodings (VP9/AV1).
+
+Keep H.264 for iOS (no scalability there).
+
+DoD: your telemetry should show steadier fps under brief bandwidth dips.
+
+Per-viewer sender tuning (mesh)
+
+You already set per-viewer params. Add a guard so a weak viewer gets Low profile while others stay High/Medium (don’t globally downshift).
+
+DoD: throttling one viewer doesn’t reduce bitrate for others.
+
+Smarter up/down rules
+
+Downshift after 3 consecutive bad ticks (≈6s); upshift after 10–15s good + loss <2% and fps ≥ 28.
+
+Prevent ping-pong by enforcing a min 8s dwell in a new profile before next change.
+
+Keyframe hygiene
+
+On: guest approved, renegotiation complete, network “recovered”, or viewer joins → call receiver.requestKeyFrame() (where supported).
+
+Fallback: sender.generateKeyFrame?.() on Chromium.
+
+DoD: faster first-frame after events; Q4 test times drop.
+
+Audio first strategy
+
+OPUS maxBitrate 64–96 kbps, ptime=20, mono for talking-head.
+
+On “Degraded” badge: temporarily raise audio priority and allow video to scale down (use degradationPreference: "maintain-framerate" or "balanced").
+
+Profiles by scene
+
+Add toggles in Host UI:
+
+Talking-head (current default 720p30).
+
+Screen share (1080p @ 15–24fps, contentHint="text", prefer VP9/AV1 off iOS).
+
+Data saver (cap High at 1 Mbps; start at Medium).
+
+DoD: switching profiles re-applies sender params without renegotiation (via setParameters).
+
+Nice-to-haves (optional)
+
+TWCC feedback check: ensure transport-cc is negotiated (better congestion control than REMB).
+
+Candidate stop: once the selected pair locks, stop emitting new local candidates (you already coalesce; this trims noise).
+
+Per-track mini overlays (dev-only): show fps/kbps/loss badge on each tile.
+
+Validation additions
+
+Extend your Validation Runner with:
+
+Q6: Downshift dwell time respected (no flip-flopping).
+
+Q7: One viewer throttled → others maintain ≥ previous bitrate.
+
+Q8: Screen-share profile locks to ~15–24 fps and higher resolution text clarity.
