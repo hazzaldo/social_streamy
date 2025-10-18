@@ -251,6 +251,13 @@ export default function Host() {
     }
     await pc.setLocalDescription(offer);
     
+    // Request keyframe for faster first frame on viewer join
+    pc.onconnectionstatechange = () => {
+      if (pc.connectionState === 'connected') {
+        requestKeyFrame(pc);
+      }
+    };
+    
     wsRef.current?.send(JSON.stringify({
       type: 'webrtc_offer',
       streamId,
@@ -373,6 +380,9 @@ export default function Host() {
           offer.sdp = enableOpusFecDtx(offer.sdp);
         }
         await pc.setLocalDescription(offer);
+        
+        // Request keyframe after renegotiation for faster recovery
+        setTimeout(() => requestKeyFrame(pc), 500);
         
         wsRef.current?.send(JSON.stringify({
           type: 'webrtc_offer',

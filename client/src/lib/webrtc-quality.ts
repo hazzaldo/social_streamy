@@ -643,11 +643,20 @@ export interface QualityManagerState {
   lastProfileChange: number;
 }
 
+interface StreamFrameTracking {
+  framesDecoded: number;
+  lastUpdateTime: number;
+}
+
 export class AdaptiveQualityManager {
   private pc: RTCPeerConnection;
   private state: QualityManagerState;
   private intervalId?: number;
   private lastFps: number = 0;
+
+  // Frozen frame detection (per-stream tracking)
+  private streamFrameTracking: Map<string, StreamFrameTracking> = new Map();
+  private readonly FROZEN_FRAME_THRESHOLD = 2000;  // 2 seconds without new frames
 
   // Adaptation thresholds - smarter rules for stability
   private readonly DEGRADE_THRESHOLD = 3;   // 3 ticks (~6s) of degraded
@@ -747,6 +756,57 @@ export class AdaptiveQualityManager {
       await raiseAudioPriorityOnDegraded(this.pc, false);
       
       console.log(`📈 Quality upgraded to: ${this.state.currentProfile}`);
+    }
+  }
+
+  /**
+   * Check for frozen frames and request keyframe if detected
+   * Call this from your monitoring loop with streamId and framesDecoded from getStats()
+   * @param streamId Unique identifier for the stream (e.g., report.id or ssrc)
+   * @param framesDecoded Current framesDecoded count from inbound-rtp stats
+   */
+  checkFrozenFrames(streamId: string, framesDecoded: number): void {
+    const now = Date.now();
+    const tracking = this.streamFrameTracking.get(streamId);
+    
+    if (!tracking) {
+      // First time seeing this stream, initialize tracking
+      this.streamFrameTracking.set(streamId, {
+        framesDecoded,
+        lastUpdateTime: now
+      });
+      return;
+    }
+    
+    // Handle counter reset (new SSRC after renegotiation)
+    if (framesDecoded < tracking.framesDecoded) {
+      // Counter reset detected, restart tracking
+      this.streamFrameTracking.set(streamId, {
+        framesDecoded,
+        lastUpdateTime: now
+      });
+      return;
+    }
+    
+    if (framesDecoded > tracking.framesDecoded) {
+      // Frames are progressing, update tracking
+      this.streamFrameTracking.set(streamId, {
+        framesDecoded,
+        lastUpdateTime: now
+      });
+    } else if (framesDecoded === tracking.framesDecoded) {
+      // Frames are stalled (including zero-frame streams), check if threshold exceeded
+      const stallDuration = now - tracking.lastUpdateTime;
+      
+      if (stallDuration >= this.FROZEN_FRAME_THRESHOLD) {
+        console.warn(`⚠️  Frozen frame detected on stream ${streamId.substring(0, 8)} (${Math.floor(stallDuration/1000)}s stall at ${framesDecoded} frames), requesting keyframe`);
+        requestKeyFrame(this.pc);
+        // Reset timer to avoid spamming keyframe requests
+        this.streamFrameTracking.set(streamId, {
+          framesDecoded: tracking.framesDecoded,
+          lastUpdateTime: now
+        });
+      }
     }
   }
 
@@ -1014,6 +1074,11 @@ export function startHealthMonitoring(
               width: report.frameWidth,
               height: report.frameHeight
             };
+          }
+
+          // Frozen frame detection (per-stream tracking)
+          if (report.framesDecoded !== undefined && report.id) {
+            qualityManager.checkFrozenFrames(report.id, report.framesDecoded);
           }
         }
 
