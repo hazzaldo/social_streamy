@@ -111,6 +111,12 @@ export default function TestHarness() {
   // Reliability & Telemetry: ICE restart tracking
   const disconnectionTimers = useRef<Map<string, NodeJS.Timeout>>(new Map());
   const iceRestartInProgress = useRef<Set<string>>(new Set());
+  
+  // Reliability & Telemetry: WebSocket auto-reconnect
+  const reconnectAttempts = useRef<number>(0);
+  const reconnectTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const manualDisconnect = useRef<boolean>(false);
+  const maxReconnectDelay = 30000; // 30s cap
 
   // Update roleRef whenever role changes
   useEffect(() => {
@@ -367,8 +373,129 @@ export default function TestHarness() {
         clearInterval(heartbeatIntervalRef.current);
         heartbeatIntervalRef.current = null;
       }
+      
+      // Only auto-reconnect if not manually disconnected
+      if (!manualDisconnect.current) {
+        scheduleReconnect();
+      } else {
+        console.log('🚫 Manual disconnect, skipping auto-reconnect');
+      }
     };
     ws.onerror = e => console.error('WS ERROR', e);
+  }
+
+  // Reliability & Telemetry: Auto-reconnect with exponential backoff
+  function scheduleReconnect() {
+    // Clear any existing reconnect timer
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current);
+    }
+
+    // Calculate backoff with jitter: base delay * 2^attempts, capped at 30s
+    const baseDelay = 1000; // 1s
+    const exponentialDelay = Math.min(
+      baseDelay * Math.pow(2, reconnectAttempts.current),
+      maxReconnectDelay
+    );
+    // Add jitter: ±20% random variation, then clamp to max
+    const jitter = exponentialDelay * 0.2 * (Math.random() * 2 - 1);
+    const delay = Math.min(exponentialDelay + jitter, maxReconnectDelay);
+
+    console.log(
+      `🔄 Reconnecting in ${Math.round(delay)}ms (attempt ${reconnectAttempts.current + 1})`
+    );
+
+    reconnectTimerRef.current = setTimeout(() => {
+      reconnectAttempts.current++;
+      attemptReconnect();
+    }, delay);
+  }
+
+  async function attemptReconnect() {
+    console.log('🔌 Attempting WebSocket reconnect...');
+    
+    // Reset manual disconnect flag on reconnect attempt
+    manualDisconnect.current = false;
+    
+    try {
+      connectWS();
+      
+      // Wait for connection to establish
+      await new Promise<void>((resolve, reject) => {
+        const timeout = setTimeout(() => reject(new Error('Connection timeout')), 5000);
+        
+        const checkConnection = setInterval(() => {
+          if (wsRef.current?.readyState === WebSocket.OPEN) {
+            clearInterval(checkConnection);
+            clearTimeout(timeout);
+            resolve();
+          }
+        }, 100);
+      });
+
+      // Connection successful - reset retry counter
+      reconnectAttempts.current = 0;
+      console.log('✅ WebSocket reconnected successfully');
+
+      // Resync role and rejoin stream
+      await resyncAfterReconnect();
+      
+    } catch (error) {
+      console.error('❌ Reconnect failed:', error);
+      // Will retry via onclose handler
+    }
+  }
+
+  async function resyncAfterReconnect() {
+    console.log(`🔄 Resyncing ${roleRef.current} after reconnect...`);
+    
+    // Rejoin stream
+    const join = { type: 'join_stream', streamId, userId };
+    wsRef.current?.send(JSON.stringify(join));
+    console.log(`📤 Rejoined stream as ${roleRef.current}`);
+
+    // Role-specific resync
+    const currentRole = roleRef.current;
+    
+    if (currentRole === 'host') {
+      // Host: re-fanout offers to all connected viewers
+      console.log('🎥 Host: Re-fanning out to viewers after reconnect');
+      const viewerIds = Array.from(hostPcByViewer.current.keys());
+      
+      for (const viewerId of viewerIds) {
+        const pc = hostPcByViewer.current.get(viewerId);
+        if (pc && pc.connectionState !== 'closed') {
+          // Create and send new offer
+          const offer = await pc.createOffer();
+          await pc.setLocalDescription(offer);
+          wsRef.current?.send(JSON.stringify({
+            type: 'webrtc_offer',
+            toUserId: viewerId,
+            fromUserId: userId,
+            sdp: offer
+          }));
+          console.log(`📤 Host: Re-sent offer to viewer ${viewerId}`);
+        }
+      }
+    } else if (currentRole === 'guest') {
+      // Guest: resend offer to host
+      console.log('🎤 Guest: Resending offer to Host after reconnect');
+      if (guestPcRef.current && guestPcRef.current.connectionState !== 'closed') {
+        const offer = await guestPcRef.current.createOffer();
+        await guestPcRef.current.setLocalDescription(offer);
+        wsRef.current?.send(JSON.stringify({
+          type: 'webrtc_offer',
+          streamId,
+          fromUserId: userId,
+          toUserId: 'host',
+          sdp: offer
+        }));
+        console.log('📤 Guest: Re-sent offer to Host');
+      }
+    } else {
+      // Viewer: wait for host to send offer
+      console.log('👁️ Viewer: Waiting for Host offer after reconnect');
+    }
   }
 
   async function startOfferToViewer(viewerId: string) {
@@ -654,9 +781,28 @@ export default function TestHarness() {
   }
 
   function disconnectWS() {
+    // Set manual disconnect flag to prevent auto-reconnect
+    manualDisconnect.current = true;
+    
+    // Cancel any pending reconnect attempts
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
+    reconnectAttempts.current = 0;
+    
     wsRef.current?.close();
     wsRef.current = null;
   }
+
+  // Cleanup reconnect timer on unmount
+  useEffect(() => {
+    return () => {
+      if (reconnectTimerRef.current) {
+        clearTimeout(reconnectTimerRef.current);
+      }
+    };
+  }, []);
 
   // Reliability & Telemetry: ICE restart on connection failure
   function setupConnectionStateMonitoring(pc: RTCPeerConnection, connectionId: string) {
