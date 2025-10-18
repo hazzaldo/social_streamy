@@ -56,6 +56,23 @@ Participants connect via WebSocket. Three roles supported: Host (broadcaster), G
 - Control message relay: cohost_mute, cohost_unmute, cohost_cam_off, cohost_cam_on, cohost_ended
 - State management: roleRef pattern to track live role in WebSocket handlers, avoiding closure capture issues
 
+**Phase 5 (Game Rails - Completed):**
+- Host-authoritative game state synchronization for lightweight interactive games
+- Server-side gameState tracking with version-based state sync (full replace or shallow merge)
+- Game message handlers: game_init, game_event, game_state with rate limiting (5 events/sec, burst 10)
+- Client-side Game Panel UI with game selection, state viewer, and event logging
+- Caption competition initial implementation with round management
+- Automatic state sync on join/reconnect
+
+**Validation Runner (Automated Testing - Completed):**
+- One-click validation suite executing automated test scenarios
+- Test scenarios: H1 (Host tracks ≤2s), H2 (Viewer join ≤4s), H3 (Frames received ≤3s), R1 (WS reconnect ≤8s), T1 (TURN usage)
+- Fault injection controls: Force TURN, throttle bitrate, simulate network changes, disable heartbeat
+- Telemetry assertions: Bitrate thresholds, RTT limits, frame counting, TURN detection
+- Pass/fail reporting with duration metrics and downloadable JSON reports
+- Server endpoints: /validate (retrieve report), /validate/report (submit), /healthz (includes validation summary)
+- CI/CD integration ready via server-side report storage and retrieval
+
 ### Feature Specifications
 - **Core Objects & Roles:** User (viewer/creator), Creator (can go live, receive gifts, accept game requests), Session (live video state), Round (timed game segment), Wallet/Coins (in-app currency).
 - **Modes:** OFFLINE, SOLO_PRIVATE, SOLO_PUBLIC, MATCH_PENDING, CO_STREAM_PUBLIC, CO_STREAM_PRIVATE, ROUND_ACTIVE, ROUND_COMPLETE.
