@@ -1,0 +1,102 @@
+Optimize Signaling Server for Reliability & Scale
+
+Goals
+
+Lower latency/jitter, prevent message storms, and make reconnects/idempotency bulletproof.
+
+Prepare for multi-room scale (1000s of rooms, 10k+ sockets).
+
+1) Message schema + idempotency
+
+Add msgId (uuid), roomId, senderId, ts, seq (per-sender increment).
+
+Server keeps a small LRU per socket of recent msgIds to drop duplicates.
+
+Add ack { for: msgId } replies for critical ops (join, offers/answers, game_event).
+
+Retries: client resends un-acked critical msgs after 1s, 2s, 4s (cap 3), then surfaces error.
+
+2) Ordered delivery and coalescing
+
+Maintain per-room queues; for high-frequency types (ice_candidate, game_state patches), coalesce within a 16–33ms tick before broadcast.
+
+Include seq and drop stale out-of-order updates (keep last applied seq per sender/type).
+
+3) Backpressure + flood control
+
+Per-socket send buffer watchdog: if ws.bufferedAmount > 1MB, start dropping non-critical types (log once) and notify client (flow_control: "drop_non_critical").
+
+Rate limits (token bucket):
+
+ice_candidate: 50/sec burst 100
+
+game_event: 5/sec burst 10, else game_error { code:"rate_limited" }
+
+Per-room fanout cap: send to N at a time (e.g., 100) then next tick, to avoid event loop starvation.
+
+4) Room state + cleanup
+
+Single RoomState object: participants, host, activeGuest, gameState, requestQueue, timestamps.
+
+Idle reaper: if room has no host for 2 minutes, auto-teardown (notify viewers with room_closed).
+
+On socket close: remove from participants; if it was host, auto-end guest and flush queue; broadcast cohost_queue_updated.
+
+5) Reconnect/session resume
+
+Issue sessionToken on join; client stores in sessionStorage.
+
+On reconnect: client sends resume { sessionToken, roomId }.
+Server restores role + pending queue position, and replies with resume_ok { role, position, gameStateVersion }.
+
+If role changed while away (e.g., host left), send resume_migrated { role:"viewer" }.
+
+6) Auth hooks (stubbed)
+
+Accept optional authToken on connect; expose a hook to validate and map to userId.
+
+If absent, generate guest userId reliably (prefix + random).
+
+7) Observability
+
+Add /metrics (Prometheus text) with: connected_sockets, rooms_total, avg_room_size, msgs_in/sec (by type), msgs_out/sec, drops_by_type, ws_buffered_bytes_p95, rate_limited_total.
+
+Structured logs (roomId, senderId, type, durationMs) for critical paths.
+
+Expand /healthz with per-room lightweight summary (sizes only).
+
+8) Security & sanity
+
+Validate payload sizes: hard cap 64KB; reject oversize with error { code:"payload_too_large" }.
+
+Validate enums/types; reject unknown type with error log (1-line).
+
+Strip unexpected fields server-side before fanout.
+
+Acceptance (DoD)
+
+Duplicate send of the same webrtc_offer with same msgId is processed once; retry with new msgId is accepted.
+
+ICE candidate floods get rate_limited and do not crash or stall other rooms.
+
+When host disconnects, room tears down after 2 minutes; viewers receive room_closed.
+
+Reconnect with resume restores role and queue position; guest resumes without manual re-request.
+
+/metrics exports counters; /healthz shows room counts; no memory growth after churn test (join/leave 1k times).
+
+Under 1,000 concurrent sockets (fake), average loop latency stays stable; no mass drops of critical messages.
+
+Test Plan (Harness additions)
+
+Add Signaling Stress panel:
+
+Duplicate Msg Test: send same msgId 5x; expect 1 ack, 4 ignored.
+
+ICE Flood: send 500 candidates quickly; expect rate limit errors; connection stays OK.
+
+Resume Test: kill WS, reconnect with sessionToken; assert role/state restored.
+
+Backpressure: simulate slow consumer (artificial delay on onmessage); ensure server triggers drop of non-critical, not critical.
+
+Expose /metrics readout in the Harness (just display text).

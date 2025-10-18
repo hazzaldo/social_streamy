@@ -2,6 +2,15 @@ import type { Express } from "express";
 import { createServer, type Server } from "http";
 import { WebSocketServer, WebSocket } from "ws";
 import { storage } from "./storage";
+import {
+  MessageDeduplicator,
+  TokenBucketRateLimiter,
+  SessionManager,
+  MetricsTracker,
+  MessageCoalescer,
+  BackpressureMonitor,
+  PayloadValidator
+} from "./signaling-utils";
 
 // In-memory room and participant tracking
 interface Participant {
@@ -40,6 +49,22 @@ const rooms = new Map<string, RoomState>();
 
 // Store latest validation report for /healthz
 let latestValidationReport: any = null;
+
+// Initialize signaling utilities
+const deduplicator = new MessageDeduplicator();
+const sessionManager = new SessionManager();
+const metrics = new MetricsTracker();
+const coalescer = new MessageCoalescer();
+const backpressureMonitor = new BackpressureMonitor();
+const payloadValidator = new PayloadValidator();
+
+// Rate limiters
+const iceCandidateRateLimiter = new TokenBucketRateLimiter(50, 50, 100); // 50/sec, burst 100
+const gameEventRateLimiter = new TokenBucketRateLimiter(5, 5, 10); // 5/sec, burst 10
+
+// Track socket IDs for deduplication
+const socketIds = new WeakMap<WebSocket, string>();
+let nextSocketId = 1;
 
 export async function registerRoutes(app: Express): Promise<Server> {
   // Health endpoints
@@ -89,6 +114,21 @@ export async function registerRoutes(app: Express): Promise<Server> {
     });
   });
 
+  // Prometheus metrics endpoint
+  app.get('/metrics', (_req, res) => {
+    // Update gauges before generating metrics
+    metrics.setGauge('connected_sockets', Array.from(rooms.values()).reduce((sum, r) => sum + r.participants.size, 0));
+    metrics.setGauge('rooms_total', rooms.size);
+    
+    const avgRoomSize = rooms.size > 0 
+      ? Array.from(rooms.values()).reduce((sum, r) => sum + r.participants.size, 0) / rooms.size 
+      : 0;
+    metrics.setGauge('avg_room_size', avgRoomSize);
+    
+    res.set('Content-Type', 'text/plain; version=0.0.4');
+    res.send(metrics.getPrometheusFormat());
+  });
+
   // Validation endpoint for CI/CD
   app.post('/validate', (_req, res) => {
     // Return the latest validation report or trigger a new one
@@ -127,27 +167,161 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   wss.on('connection', (ws: WebSocket) => {
     let currentParticipant: Participant | null = null;
+    let sessionToken: string | null = null;
 
-    console.log('🔌 New WebSocket connection');
+    // Assign socket ID for deduplication
+    const socketId = `sock_${nextSocketId++}`;
+    socketIds.set(ws, socketId);
+
+    console.log('🔌 New WebSocket connection:', socketId);
+    metrics.increment('ws_connections_total');
 
     ws.on('message', (raw) => {
+      const msgStart = Date.now();
       let msg: any;
       try {
         msg = JSON.parse(raw.toString());
       } catch (e) {
         console.error('❌ Failed to parse WebSocket message', e);
+        metrics.increment('msgs_parse_errors');
         return;
+      }
+
+      // Validate payload
+      const validation = payloadValidator.validate(msg);
+      if (!validation.valid) {
+        console.error('❌ Invalid payload:', validation.error, msg.type);
+        ws.send(JSON.stringify({
+          type: 'error',
+          code: validation.error,
+          message: 'Invalid message payload'
+        }));
+        metrics.increment('msgs_invalid');
+        return;
+      }
+
+      // Sanitize message
+      msg = payloadValidator.sanitize(msg);
+
+      // Track incoming messages
+      metrics.increment(`msgs_in_total`);
+      metrics.increment(`msgs_in_${msg.type || 'unknown'}`);
+
+      // Deduplication check
+      if (msg.msgId) {
+        if (deduplicator.isDuplicate(socketId, msg.msgId)) {
+          console.log('🔄 Duplicate message ignored:', msg.msgId, msg.type);
+          metrics.increment('msgs_duplicates');
+          return;
+        }
       }
 
       console.log('📩 WS Message:', msg.type, msg);
 
+      // Helper function to send message with backpressure check and ack
+      const sendMessage = (targetWs: WebSocket, message: any, critical: boolean = true) => {
+        if (targetWs.readyState !== WebSocket.OPEN) return false;
+        
+        // Check backpressure
+        if (backpressureMonitor.shouldDrop(targetWs, message.type)) {
+          console.warn('⚠️ Dropping non-critical message due to backpressure:', message.type);
+          metrics.increment(`msgs_dropped_${message.type}`);
+          return false;
+        }
+        
+        targetWs.send(JSON.stringify(message));
+        metrics.increment('msgs_out_total');
+        metrics.increment(`msgs_out_${message.type}`);
+        return true;
+      };
+
+      // Send acknowledgment for critical messages
+      const sendAck = (msgId: string) => {
+        if (msgId) {
+          sendMessage(ws, {
+            type: 'ack',
+            for: msgId,
+            ts: Date.now()
+          }, true);
+        }
+      };
+
       switch (msg.type) {
         case 'ping': {
           // Heartbeat ping - respond with pong for mobile network reliability
-          ws.send(JSON.stringify({
+          sendMessage(ws, {
             type: 'pong',
             ts: Date.now()
-          }));
+          });
+          break;
+        }
+
+        case 'resume': {
+          // Session resume
+          const { sessionToken: token, roomId } = msg;
+          if (!token) {
+            sendMessage(ws, {
+              type: 'error',
+              code: 'INVALID_RESUME',
+              message: 'Missing session token'
+            });
+            break;
+          }
+
+          const session = sessionManager.getSession(token);
+          if (!session) {
+            sendMessage(ws, {
+              type: 'error',
+              code: 'SESSION_EXPIRED',
+              message: 'Session token expired or invalid'
+            });
+            break;
+          }
+
+          // Restore session
+          sessionToken = token;
+          const { userId, streamId, role, queuePosition } = session;
+
+          // Get or create room
+          if (!rooms.has(streamId)) {
+            sendMessage(ws, {
+              type: 'resume_migrated',
+              role: 'viewer',
+              reason: 'room_closed'
+            });
+            break;
+          }
+
+          const roomState = rooms.get(streamId)!;
+          
+          // Restore participant
+          currentParticipant = { ws, userId, streamId, role: role as any };
+          roomState.participants.set(userId, currentParticipant);
+
+          console.log('🔄 Session resumed:', { userId, streamId, role });
+          
+          // Send resume confirmation with current game state
+          sendMessage(ws, {
+            type: 'resume_ok',
+            role,
+            position: queuePosition,
+            gameStateVersion: roomState.gameState.version
+          });
+
+          // Send current game state if active
+          if (roomState.gameState.gameId) {
+            sendMessage(ws, {
+              type: 'game_state',
+              streamId,
+              version: roomState.gameState.version,
+              full: true,
+              patch: roomState.gameState.data,
+              gameId: roomState.gameState.gameId,
+              seed: roomState.gameState.seed
+            });
+          }
+
+          sendAck(msg.msgId);
           break;
         }
 
@@ -192,24 +366,35 @@ export async function registerRoutes(app: Express): Promise<Server> {
           currentParticipant = { ws, userId: String(userId), streamId, role };
           room.set(String(userId), currentParticipant);
 
+          // Create session token for reconnection
+          sessionToken = sessionManager.createSession(String(userId), streamId, role);
+
           console.log(`✅ ${role.toUpperCase()} joined stream:`, { 
             streamId, 
             userId, 
             roomSize: room.size,
-            totalRooms: rooms.size 
+            totalRooms: rooms.size,
+            sessionToken
+          });
+
+          // Send join confirmation with session token
+          sendMessage(ws, {
+            type: 'join_confirmed',
+            streamId,
+            userId: String(userId),
+            role,
+            sessionToken
           });
 
           // If viewer joined, notify the host
           if (role === 'viewer') {
             const host = Array.from(room.values()).find(p => p.role === 'host');
             if (host && host.ws.readyState === WebSocket.OPEN) {
-              const joinedMsg = {
+              sendMessage(host.ws, {
                 type: 'joined_stream',
                 streamId,
                 userId: String(userId)
-              };
-              console.log('📤 joined_stream -> host', joinedMsg);
-              host.ws.send(JSON.stringify(joinedMsg));
+              });
             }
           }
 
@@ -222,7 +407,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
           // Phase 5: Send current game state if game is active
           if (roomState.gameState.gameId) {
-            ws.send(JSON.stringify({
+            sendMessage(ws, {
               type: 'game_state',
               streamId,
               version: roomState.gameState.version,
@@ -230,13 +415,15 @@ export async function registerRoutes(app: Express): Promise<Server> {
               patch: roomState.gameState.data,
               gameId: roomState.gameState.gameId,
               seed: roomState.gameState.seed
-            }));
+            });
             console.log('🎮 Sent game state to new participant:', { 
               userId, 
               gameId: roomState.gameState.gameId,
               version: roomState.gameState.version 
             });
           }
+
+          sendAck(msg.msgId);
           break;
         }
 
@@ -387,6 +574,20 @@ export async function registerRoutes(app: Express): Promise<Server> {
             return;
           }
 
+          // Rate limiting: 50/sec, burst 100 - use authenticated userId
+          const authenticatedUserId = currentParticipant?.userId || 'anonymous';
+          const rateKey = `ice_${authenticatedUserId}`;
+          if (!iceCandidateRateLimiter.tryConsume(rateKey, 1)) {
+            sendMessage(ws, {
+              type: 'error',
+              code: 'rate_limited',
+              message: 'Too many ICE candidates. Please slow down.'
+            });
+            metrics.increment('rate_limited_ice_candidate');
+            console.warn('⚠️ ICE candidate rate limit exceeded:', authenticatedUserId);
+            return;
+          }
+
           // Special handling: if toUserId is 'host', find the actual host in the room
           let actualToUserId = toUserId;
           if (toUserId === 'host' && currentParticipant) {
@@ -400,11 +601,30 @@ export async function registerRoutes(app: Express): Promise<Server> {
             }
           }
 
-          relayToUser(actualToUserId, {
-            type: 'ice_candidate',
-            fromUserId: String(fromUserId),
-            candidate
-          });
+          // Coalesce ICE candidates to reduce signaling overhead
+          if (currentParticipant) {
+            const roomId = currentParticipant.streamId;
+            coalescer.coalesce(
+              roomId,
+              'ice_candidate',
+              {
+                type: 'ice_candidate',
+                fromUserId: String(fromUserId),
+                toUserId: actualToUserId,
+                candidate
+              },
+              (messages) => {
+                // Flush coalesced candidates
+                for (const msg of messages) {
+                  relayToUser(msg.toUserId, {
+                    type: 'ice_candidate',
+                    fromUserId: msg.fromUserId,
+                    candidate: msg.candidate
+                  });
+                }
+              }
+            );
+          }
           break;
         }
 
@@ -766,14 +986,25 @@ export async function registerRoutes(app: Express): Promise<Server> {
             full 
           });
 
-          // Broadcast to all participants
-          broadcastToRoom(streamId, {
-            type: 'game_state',
+          // Coalesce game state updates to reduce broadcast overhead
+          coalescer.coalesce(
             streamId,
-            version: roomState.gameState.version,
-            full,
-            patch: full ? roomState.gameState.data : patch
-          });
+            'game_state',
+            {
+              type: 'game_state',
+              streamId,
+              version: roomState.gameState.version,
+              full,
+              patch: full ? roomState.gameState.data : patch
+            },
+            (messages) => {
+              // Only send the latest state (last message in queue)
+              if (messages.length > 0) {
+                const latestState = messages[messages.length - 1];
+                broadcastToRoom(streamId, latestState);
+              }
+            }
+          );
           break;
         }
 
@@ -781,75 +1012,83 @@ export async function registerRoutes(app: Express): Promise<Server> {
           // Phase 5: Guest/Viewer sends game event to host
           const { streamId, type: eventType, payload, from } = msg;
           if (!streamId || !eventType) {
-            ws.send(JSON.stringify({
+            sendMessage(ws, {
               type: 'game_error',
               streamId,
               code: 'INVALID_EVENT',
               message: 'Missing streamId or event type'
-            }));
+            });
             return;
           }
 
           const roomState = rooms.get(streamId);
           if (!roomState) return;
 
-          const userId = currentParticipant?.userId || from;
-          if (!userId) return;
-
-          // Rate limiting: 5 events/sec, burst 10
-          const now = Date.now();
-          let tracker = roomState.rateLimits.get(userId);
-          if (!tracker) {
-            tracker = { tokens: 10, lastRefill: now };
-            roomState.rateLimits.set(userId, tracker);
-          }
-
-          // Token bucket refill
-          const elapsed = now - tracker.lastRefill;
-          const refillTokens = Math.floor(elapsed / 200); // 5 per second = 200ms per token
-          if (refillTokens > 0) {
-            tracker.tokens = Math.min(10, tracker.tokens + refillTokens);
-            tracker.lastRefill = now;
-          }
-
-          // Check if event allowed
-          if (tracker.tokens < 1) {
-            ws.send(JSON.stringify({
-              type: 'game_error',
-              streamId,
-              code: 'RATE_LIMIT',
-              message: 'Too many events. Please slow down.'
-            }));
-            console.warn('⚠️ Rate limit exceeded:', userId);
+          // Use authenticated userId from currentParticipant
+          const authenticatedUserId = currentParticipant?.userId;
+          if (!authenticatedUserId) {
+            console.warn('⚠️ Game event from unauthenticated connection');
             return;
           }
 
-          // Consume token
-          tracker.tokens -= 1;
+          // Rate limiting: 5 events/sec, burst 10 - use authenticated userId
+          const rateKey = `game_${authenticatedUserId}`;
+          if (!gameEventRateLimiter.tryConsume(rateKey, 1)) {
+            sendMessage(ws, {
+              type: 'game_error',
+              streamId,
+              code: 'rate_limited',
+              message: 'Too many game events. Please slow down.'
+            });
+            metrics.increment('rate_limited_game_event');
+            console.warn('⚠️ Game event rate limit exceeded:', authenticatedUserId);
+            return;
+          }
 
-          console.log('🎮 Game event received:', { streamId, eventType, from: userId });
+          console.log('🎮 Game event received:', { streamId, eventType, from: authenticatedUserId });
 
           // Forward to host for processing
           const host = Array.from(roomState.participants.values()).find(p => p.role === 'host');
           if (host && host.ws.readyState === WebSocket.OPEN) {
-            host.ws.send(JSON.stringify({
+            sendMessage(host.ws, {
               type: 'game_event',
               streamId,
               eventType,
               payload,
-              from: userId
-            }));
+              from: authenticatedUserId
+            });
           }
+
+          sendAck(msg.msgId);
           break;
         }
 
         default:
           console.warn('⚠️ Unknown message type:', msg.type);
       }
+
+      // Track message processing duration
+      const duration = Date.now() - msgStart;
+      metrics.recordValue('msg_processing_duration_ms', duration);
     });
 
     ws.on('close', () => {
-      console.log('🔌 WebSocket disconnected');
+      console.log('🔌 WebSocket disconnected:', socketId);
+      metrics.increment('ws_disconnections_total');
+      
+      // Cleanup signaling utilities
+      deduplicator.cleanup(socketId);
+      if (sessionToken) {
+        // Don't remove session immediately - allow reconnection window
+        console.log('💾 Session preserved for reconnection:', sessionToken);
+      }
+      if (currentParticipant) {
+        const rateKey = `ice_${currentParticipant.userId}`;
+        iceCandidateRateLimiter.cleanup(rateKey);
+        const gameKey = `game_${currentParticipant.userId}`;
+        gameEventRateLimiter.cleanup(gameKey);
+      }
+      
       // Clean up participant
       if (currentParticipant) {
         const { streamId, userId, role } = currentParticipant;
@@ -981,6 +1220,49 @@ export async function registerRoutes(app: Express): Promise<Server> {
     };
     console.log('📊 Connection Summary:', summary);
   }, 60000);
+
+  // Idle room reaper (every 30 seconds)
+  const IDLE_TIMEOUT = 2 * 60 * 1000; // 2 minutes
+  const roomLastHostSeen = new Map<string, number>();
+  
+  setInterval(() => {
+    const now = Date.now();
+    
+    for (const [streamId, roomState] of Array.from(rooms.entries())) {
+      const hasHost = Array.from(roomState.participants.values()).some(p => p.role === 'host');
+      
+      if (hasHost) {
+        // Reset timeout - host is present
+        roomLastHostSeen.set(streamId, now);
+      } else {
+        // No host - check if timed out
+        const lastSeen = roomLastHostSeen.get(streamId) || now;
+        if (now - lastSeen > IDLE_TIMEOUT) {
+          console.log('🧹 Reaping idle room (no host for 2 min):', streamId);
+          
+          // Notify all participants
+          for (const participant of Array.from(roomState.participants.values())) {
+            if (participant.ws.readyState === WebSocket.OPEN) {
+              participant.ws.send(JSON.stringify({
+                type: 'room_closed',
+                streamId,
+                reason: 'host_timeout'
+              }));
+            }
+          }
+          
+          // Cleanup room
+          coalescer.cleanup(streamId);
+          rooms.delete(streamId);
+          roomLastHostSeen.delete(streamId);
+          metrics.increment('rooms_reaped');
+        }
+      }
+    }
+    
+    // Cleanup expired sessions
+    sessionManager.cleanupExpired();
+  }, 30000);
 
   return httpServer;
 }
