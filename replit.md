@@ -46,6 +46,16 @@ Participants connect via WebSocket. Three roles supported: Host (broadcaster), G
 - Viewers receive and display multiple streams: first stream ID = Host video, second = Guest video
 - UI shows 3 video elements: Local Preview (Host), Host Stream (for Viewers), Guest Stream (for Viewers)
 
+**Phase 4 (Co-host Request/Approval UI - Completed):**
+- Manual approval workflow: Viewers request co-host, Host approves/declines from queue
+- Viewer UI: Request button with state machine (idle → pending → accepted/declined), cancel functionality
+- Host UI: Pending request queue with Approve/Decline buttons, active guest controls panel
+- Guest controls: Mute/Unmute audio, Camera On/Off, End Co-host session
+- Single-guest enforcement: Additional requests queued when guest active, auto-declined when queue full
+- Queue management: Server broadcasts queue updates after mutations, cleanup on disconnect/leave
+- Control message relay: cohost_mute, cohost_unmute, cohost_cam_off, cohost_cam_on, cohost_ended
+- State management: roleRef pattern to track live role in WebSocket handlers, avoiding closure capture issues
+
 ### Feature Specifications
 - **Core Objects & Roles:** User (viewer/creator), Creator (can go live, receive gifts, accept game requests), Session (live video state), Round (timed game segment), Wallet/Coins (in-app currency).
 - **Modes:** OFFLINE, SOLO_PRIVATE, SOLO_PUBLIC, MATCH_PENDING, CO_STREAM_PUBLIC, CO_STREAM_PRIVATE, ROUND_ACTIVE, ROUND_COMPLETE.

@@ -48,7 +48,13 @@ type ServerMsg =
   | { type: 'pong'; ts: number }
   | { type: 'cohost_request'; fromUserId: string; streamId: string }
   | { type: 'cohost_accepted'; streamId: string }
-  | { type: 'cohost_declined'; streamId: string };
+  | { type: 'cohost_declined'; streamId: string; reason?: string }
+  | { type: 'cohost_ended'; streamId: string; by: 'host' | 'guest'; guestUserId?: string }
+  | { type: 'cohost_queue_updated'; streamId: string; queue: Array<{ userId: string; timestamp: number }> }
+  | { type: 'cohost_mute'; streamId: string }
+  | { type: 'cohost_unmute'; streamId: string }
+  | { type: 'cohost_cam_off'; streamId: string }
+  | { type: 'cohost_cam_on'; streamId: string };
 
 const ICE_CONFIG: RTCConfiguration = {
   iceServers: [
@@ -69,6 +75,8 @@ const ICE_CONFIG: RTCConfiguration = {
   iceCandidatePoolSize: 10
 };
 
+type CohostRequestState = 'idle' | 'pending' | 'accepted' | 'declined';
+
 export default function TestHarness() {
   const [role, setRole] = useState<Role>('host');
   const [streamId, setStreamId] = useState<string>('test-stream');
@@ -77,6 +85,13 @@ export default function TestHarness() {
   );
   const [wsConnected, setWsConnected] = useState(false);
   const [hasLocalTracks, setHasLocalTracks] = useState(false);
+  
+  // Phase 4: Cohost request state (for Viewers)
+  const [cohostRequestState, setCohostRequestState] = useState<CohostRequestState>('idle');
+  
+  // Phase 4: Cohost queue (for Host)
+  const [cohostQueue, setCohostQueue] = useState<Array<{ userId: string; timestamp: number }>>([]);
+  const [activeGuestId, setActiveGuestId] = useState<string | null>(null);
 
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
   const remoteVideoRef = useRef<HTMLVideoElement | null>(null);
@@ -91,6 +106,12 @@ export default function TestHarness() {
   const heartbeatIntervalRef = useRef<NodeJS.Timeout | null>(null);
   const viewerHostStreamIdRef = useRef<string | null>(null);
   const viewerGuestStreamIdRef = useRef<string | null>(null);
+  const roleRef = useRef<Role>(role);
+
+  // Update roleRef whenever role changes
+  useEffect(() => {
+    roleRef.current = role;
+  }, [role]);
 
   const isHost = role === 'host';
   const isGuest = role === 'guest';
@@ -173,33 +194,92 @@ export default function TestHarness() {
           // Heartbeat response received
           break;
         case 'cohost_request': {
-          // Host receives co-host request from a viewer
-          if (!isHost) return;
+          // Host receives co-host request from a viewer (Phase 4: now queued, not auto-accepted)
+          if (roleRef.current !== 'host') return;
           console.log('🎤 Host: Received co-host request from:', data.fromUserId);
-          // Auto-accept for Phase 2 testing. Phase 4 will add UI prompt
-          wsRef.current?.send(JSON.stringify({
-            type: 'cohost_accept',
-            streamId,
-            guestUserId: data.fromUserId
-          }));
-          console.log('✅ Host: Auto-accepted co-host request from:', data.fromUserId);
+          // Queue is managed server-side, will be received via cohost_queue_updated
+          break;
+        }
+        case 'cohost_queue_updated': {
+          // Host receives updated queue of pending cohost requests
+          if (roleRef.current !== 'host') return;
+          console.log('📋 Host: Cohost queue updated:', data.queue);
+          setCohostQueue(data.queue || []);
           break;
         }
         case 'cohost_accepted': {
-          // Viewer promoted to Guest
-          if (!isGuest && !isViewer) return;
-          console.log('🎤 Guest: Co-host request accepted! Becoming Guest...');
-          setRole('guest');
-          // Guest should now initiate bidirectional connection with Host
-          await startGuestOfferToHost();
+          // The viewer who requested (this client) transitions to guest
+          // We determine this is for us because server only sends to the accepted user
+          if (roleRef.current === 'viewer') {
+            console.log('🎤 Viewer: Co-host request accepted! Becoming Guest...');
+            setCohostRequestState('accepted');
+            setRole('guest');
+            // Guest should now initiate bidirectional connection with Host
+            await startGuestOfferToHost();
+          }
           break;
         }
         case 'cohost_declined': {
-          console.log('❌ Co-host request declined');
+          console.log('❌ Viewer: Co-host request declined, reason:', data.reason);
+          setCohostRequestState('declined');
+          // Reset to idle after a delay
+          setTimeout(() => setCohostRequestState('idle'), 3000);
+          break;
+        }
+        case 'cohost_ended': {
+          console.log('🔚 Cohost session ended by:', data.by);
+          // Check if current user is the guest (using live ref)
+          if (roleRef.current === 'guest') {
+            // Guest demoted back to viewer
+            setRole('viewer');
+            setCohostRequestState('idle');
+            // Clean up Guest peer connection
+            if (guestPcRef.current) {
+              guestPcRef.current.close();
+              guestPcRef.current = null;
+            }
+            // Stop local tracks
+            if (localStreamRef.current) {
+              localStreamRef.current.getTracks().forEach(t => t.stop());
+              localStreamRef.current = null;
+              setHasLocalTracks(false);
+            }
+          }
+          if (roleRef.current === 'host') {
+            setActiveGuestId(null);
+          }
+          break;
+        }
+        case 'cohost_mute': {
+          // Guest receives mute command from Host
+          if (roleRef.current !== 'guest') return;
+          console.log('🔇 Guest: Mute command from Host');
+          localStreamRef.current?.getAudioTracks().forEach(t => t.enabled = false);
+          break;
+        }
+        case 'cohost_unmute': {
+          // Guest receives unmute command from Host
+          if (roleRef.current !== 'guest') return;
+          console.log('🔊 Guest: Unmute command from Host');
+          localStreamRef.current?.getAudioTracks().forEach(t => t.enabled = true);
+          break;
+        }
+        case 'cohost_cam_off': {
+          // Guest receives camera off command from Host
+          if (roleRef.current !== 'guest') return;
+          console.log('📹 Guest: Camera off command from Host');
+          localStreamRef.current?.getVideoTracks().forEach(t => t.enabled = false);
+          break;
+        }
+        case 'cohost_cam_on': {
+          // Guest receives camera on command from Host
+          if (roleRef.current !== 'guest') return;
+          console.log('📹 Guest: Camera on command from Host');
+          localStreamRef.current?.getVideoTracks().forEach(t => t.enabled = true);
           break;
         }
         case 'joined_stream': {
-          if (!isHost) return;
+          if (roleRef.current !== 'host') return;
           const viewerId = String((data as JoinedStreamMsg).userId ?? '');
           console.log(`Host: 👤 Participant joined stream: ${viewerId}`, 'raw:', data);
           if (!viewerId) {
@@ -211,7 +291,7 @@ export default function TestHarness() {
         }
         case 'webrtc_offer': {
           const msg = data as OfferMsg;
-          if (isHost) {
+          if (roleRef.current === 'host') {
             // Host can receive offers from Guest (bidirectional)
             console.log(`Host: 📥 RECEIVED webrtc_offer from ${msg.fromUserId} (likely Guest)`, {
               sdpLen: msg.sdp?.sdp?.length
@@ -227,7 +307,7 @@ export default function TestHarness() {
         }
         case 'webrtc_answer': {
           const msg = data as AnswerMsg;
-          if (isHost) {
+          if (roleRef.current === 'host') {
             const pc = hostPcByViewer.current.get(String(msg.fromUserId));
             if (!pc) {
               console.warn('No PC for answer from', msg.fromUserId);
@@ -237,7 +317,7 @@ export default function TestHarness() {
             console.log(
               `Host: ✅ Host setRemoteDescription(answer) for ${msg.fromUserId}`
             );
-          } else if (isGuest) {
+          } else if (roleRef.current === 'guest') {
             // Guest receives answer from Host
             const pc = guestPcRef.current;
             if (!pc) {
@@ -253,11 +333,11 @@ export default function TestHarness() {
         }
         case 'ice_candidate': {
           const msg = data as IceMsg;
-          if (isHost) {
+          if (roleRef.current === 'host') {
             const pc = hostPcByViewer.current.get(String(msg.fromUserId));
             if (pc)
               await pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
-          } else if (isGuest) {
+          } else if (roleRef.current === 'guest') {
             if (guestPcRef.current)
               await guestPcRef.current.addIceCandidate(
                 new RTCIceCandidate(msg.candidate)
@@ -536,13 +616,13 @@ export default function TestHarness() {
     console.log('📡 Fan-out: Adding Guest tracks to all viewers and renegotiating');
     
     // Add Guest tracks to all existing viewer peer connections and renegotiate
-    for (const [viewerId, pc] of hostPcByViewer.current.entries()) {
+    for (const [viewerId, pc] of Array.from(hostPcByViewer.current.entries())) {
       // Check if this PC already has Guest tracks (to avoid duplicates)
       const senders = pc.getSenders();
       const guestTracks = guestStreamRef.current.getTracks();
       
       let tracksAdded = false;
-      guestTracks.forEach(track => {
+      guestTracks.forEach((track: MediaStreamTrack) => {
         const existingSender = senders.find(s => s.track?.id === track.id);
         if (!existingSender) {
           pc.addTrack(track, guestStreamRef.current!);
@@ -571,6 +651,103 @@ export default function TestHarness() {
   function disconnectWS() {
     wsRef.current?.close();
     wsRef.current = null;
+  }
+
+  // Phase 4: Viewer requests to become cohost
+  function requestCohost() {
+    if (!wsRef.current || !wsConnected || cohostRequestState !== 'idle') return;
+    console.log('Viewer: 📤 Sending cohost_request');
+    wsRef.current.send(JSON.stringify({
+      type: 'cohost_request',
+      streamId,
+      fromUserId: userId
+    }));
+    setCohostRequestState('pending');
+  }
+
+  // Phase 4: Viewer cancels cohost request
+  function cancelCohostRequest() {
+    if (!wsRef.current || cohostRequestState !== 'pending') return;
+    console.log('Viewer: 🚫 Canceling cohost_request');
+    wsRef.current.send(JSON.stringify({
+      type: 'cohost_cancel',
+      streamId,
+      userId
+    }));
+    setCohostRequestState('idle');
+  }
+
+  // Phase 4: Host approves cohost request
+  function approveCohost(guestUserId: string) {
+    if (!wsRef.current || !isHost) return;
+    console.log('Host: ✅ Approving cohost request from:', guestUserId);
+    wsRef.current.send(JSON.stringify({
+      type: 'cohost_accept',
+      streamId,
+      guestUserId
+    }));
+    setActiveGuestId(guestUserId);
+  }
+
+  // Phase 4: Host declines cohost request
+  function declineCohost(viewerUserId: string, reason?: string) {
+    if (!wsRef.current || !isHost) return;
+    console.log('Host: ❌ Declining cohost request from:', viewerUserId);
+    wsRef.current.send(JSON.stringify({
+      type: 'cohost_decline',
+      streamId,
+      viewerUserId,
+      reason
+    }));
+  }
+
+  // Phase 4: Host ends cohost session
+  function endCohost() {
+    if (!wsRef.current || !isHost || !activeGuestId) return;
+    console.log('Host: 🔚 Ending cohost session');
+    wsRef.current.send(JSON.stringify({
+      type: 'cohost_end',
+      streamId,
+      by: 'host'
+    }));
+    setActiveGuestId(null);
+  }
+
+  // Phase 4: Host controls Guest media
+  function muteGuest() {
+    if (!wsRef.current || !isHost || !activeGuestId) return;
+    wsRef.current.send(JSON.stringify({
+      type: 'cohost_mute',
+      streamId,
+      target: 'guest'
+    }));
+  }
+
+  function unmuteGuest() {
+    if (!wsRef.current || !isHost || !activeGuestId) return;
+    wsRef.current.send(JSON.stringify({
+      type: 'cohost_unmute',
+      streamId,
+      target: 'guest'
+    }));
+  }
+
+  function guestCamOff() {
+    if (!wsRef.current || !isHost || !activeGuestId) return;
+    wsRef.current.send(JSON.stringify({
+      type: 'cohost_cam_off',
+      streamId,
+      target: 'guest'
+    }));
+  }
+
+  function guestCamOn() {
+    if (!wsRef.current || !isHost || !activeGuestId) return;
+    wsRef.current.send(JSON.stringify({
+      type: 'cohost_cam_on',
+      streamId,
+      target: 'guest'
+    }));
   }
 
   return (
@@ -703,7 +880,7 @@ export default function TestHarness() {
             </div>
 
             {/* Connection Status */}
-            <div className="flex items-center gap-2">
+            <div className="flex items-center gap-2 flex-wrap">
               <Badge
                 variant={wsConnected ? 'default' : 'secondary'}
                 className={wsConnected ? 'bg-live' : ''}
@@ -719,6 +896,117 @@ export default function TestHarness() {
                 </Badge>
               )}
             </div>
+
+            {/* Phase 4: Viewer Cohost Request UI */}
+            {isViewer && wsConnected && (
+              <div className="space-y-2 pt-2 border-t">
+                <div className="flex items-center gap-2">
+                  {cohostRequestState === 'idle' && (
+                    <Button
+                      onClick={requestCohost}
+                      variant="default"
+                      className="flex-1"
+                      data-testid="button-request-cohost"
+                    >
+                      <UserIcon className="mr-2 h-4 w-4" />
+                      Request Co-host
+                    </Button>
+                  )}
+                  {cohostRequestState === 'pending' && (
+                    <>
+                      <Badge variant="secondary" className="flex-1" data-testid="badge-cohost-pending">
+                        <div className="mr-2 h-2 w-2 rounded-full bg-yellow-500 animate-pulse" />
+                        Request Pending...
+                      </Badge>
+                      <Button
+                        onClick={cancelCohostRequest}
+                        variant="outline"
+                        size="sm"
+                        data-testid="button-cancel-cohost"
+                      >
+                        Cancel
+                      </Button>
+                    </>
+                  )}
+                  {cohostRequestState === 'accepted' && (
+                    <Badge variant="default" className="flex-1 bg-green-600" data-testid="badge-cohost-accepted">
+                      <div className="mr-2 h-2 w-2 rounded-full bg-white" />
+                      Accepted! Connecting...
+                    </Badge>
+                  )}
+                  {cohostRequestState === 'declined' && (
+                    <Badge variant="destructive" className="flex-1" data-testid="badge-cohost-declined">
+                      Declined
+                    </Badge>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {/* Phase 4: Host Queue & Controls UI */}
+            {isHost && wsConnected && (
+              <div className="space-y-4 pt-2 border-t">
+                {/* Active Guest Controls */}
+                {activeGuestId && (
+                  <div className="space-y-2">
+                    <div className="text-sm font-medium">Active Guest: {activeGuestId}</div>
+                    <div className="flex flex-wrap gap-2">
+                      <Button onClick={muteGuest} variant="outline" size="sm" data-testid="button-mute-guest">
+                        Mute
+                      </Button>
+                      <Button onClick={unmuteGuest} variant="outline" size="sm" data-testid="button-unmute-guest">
+                        Unmute
+                      </Button>
+                      <Button onClick={guestCamOff} variant="outline" size="sm" data-testid="button-cam-off-guest">
+                        Cam Off
+                      </Button>
+                      <Button onClick={guestCamOn} variant="outline" size="sm" data-testid="button-cam-on-guest">
+                        Cam On
+                      </Button>
+                      <Button onClick={endCohost} variant="destructive" size="sm" data-testid="button-end-cohost">
+                        End Co-host
+                      </Button>
+                    </div>
+                  </div>
+                )}
+
+                {/* Cohost Request Queue */}
+                {cohostQueue.length > 0 && !activeGuestId && (
+                  <div className="space-y-2">
+                    <div className="text-sm font-medium">
+                      Pending Co-host Requests ({cohostQueue.length})
+                    </div>
+                    <div className="space-y-2">
+                      {cohostQueue.map((request) => (
+                        <div
+                          key={request.userId}
+                          className="flex items-center gap-2 p-2 rounded-md bg-muted"
+                          data-testid={`request-${request.userId}`}
+                        >
+                          <div className="flex-1 text-sm font-mono">{request.userId}</div>
+                          <Button
+                            onClick={() => approveCohost(request.userId)}
+                            variant="default"
+                            size="sm"
+                            data-testid={`button-approve-${request.userId}`}
+                          >
+                            Approve
+                          </Button>
+                          <Button
+                            onClick={() => declineCohost(request.userId)}
+                            variant="outline"
+                            size="sm"
+                            data-testid={`button-decline-${request.userId}`}
+                          >
+                            Decline
+                          </Button>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
           </CardContent>
         </Card>
 
