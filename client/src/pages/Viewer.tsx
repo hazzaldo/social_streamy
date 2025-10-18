@@ -59,16 +59,6 @@ export default function Viewer() {
   const [isMuted, setIsMuted] = useState(true);
   const [isReconnecting, setIsReconnecting] = useState(false);
   
-  // Debug mode: ?debug=1 shows HUD with live stats
-  const [location] = useLocation();
-  const [showDebugHUD, setShowDebugHUD] = useState(false);
-  
-  // Check for ?debug=1 query parameter
-  useEffect(() => {
-    const searchParams = new URLSearchParams(window.location.search);
-    setShowDebugHUD(searchParams.get('debug') === '1');
-  }, [location]);
-  
   const hostVideoRef = useRef<HTMLVideoElement | null>(null);
   const guestVideoRef = useRef<HTMLVideoElement | null>(null);
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
@@ -464,7 +454,7 @@ export default function Viewer() {
   }
 
   async function handleHostOffer(sdp: RTCSessionDescriptionInit, metadata?: { hostStreamId?: string; guestStreamId?: string }) {
-    // Close existing connection if any
+    // 1. Create new RTCPeerConnection (no reuse)
     if (hostPcRef.current) {
       hostPcRef.current.close();
     }
@@ -472,112 +462,96 @@ export default function Viewer() {
     const pc = new RTCPeerConnection(ICE_CONFIG);
     hostPcRef.current = pc;
     
-    // Add recvonly transceiver for video BEFORE setting remote description
-    pc.addTransceiver('video', { direction: 'recvonly' });
+    // 2. Add recvonly transceiver for video BEFORE setting remote description
+    const videoTransceiver = pc.addTransceiver('video', { direction: 'recvonly' });
     console.log("[VIEWER] Added recvonly video transceiver");
     
-    const streamMap = new Map<string, MediaStream>();
-    let hostStreamAssigned = false;
-    let guestStreamAssigned = false;
-    let ontrackFired = false;
+    // 3. Force H.264 only: Try setCodecPreferences first, fall back to SDP munging
+    let h264Forced = false;
+    if ('setCodecPreferences' in videoTransceiver && typeof videoTransceiver.setCodecPreferences === 'function') {
+      try {
+        const capabilities = RTCRtpReceiver.getCapabilities?.('video');
+        if (capabilities && capabilities.codecs) {
+          const h264Codecs = capabilities.codecs.filter(codec => 
+            codec.mimeType.toLowerCase() === 'video/h264'
+          );
+          if (h264Codecs.length > 0) {
+            videoTransceiver.setCodecPreferences(h264Codecs);
+            h264Forced = true;
+            console.log("[VIEWER] Forced H.264 via setCodecPreferences");
+          }
+        }
+      } catch (err) {
+        console.warn("[VIEWER] setCodecPreferences failed, will use SDP munging:", err);
+      }
+    }
     
-    // Failure detection timers
-    const ontrackTimerRef = setTimeout(() => {
+    // Watchdog timers
+    let ontrackFired = false;
+    const noOntrackTimer = setTimeout(() => {
       if (!ontrackFired) {
         console.error("❌ NO_ONTRACK: ontrack never fired after 5s");
       }
     }, 5000);
     
-    pc.ontrack = (event) => {
+    // 4. Simple ontrack handler - direct attachment
+    pc.ontrack = (e) => {
       ontrackFired = true;
-      clearTimeout(ontrackTimerRef);
+      clearTimeout(noOntrackTimer);
       
-      const [stream] = event.streams;
+      const [stream] = e.streams;
       if (!stream) return;
       
-      // Log track arrival
-      console.log("[VIEWER] ontrack", event.track.kind, stream?.id);
+      const video = hostVideoRef.current;
+      if (!video) return;
       
-      // Set playout delay hint for low-latency playback (0.2s)
-      if (event.receiver) {
-        setPlayoutDelayHint(event.receiver, 0.2);
-      }
+      video.muted = true;
+      video.playsInline = true;
+      video.srcObject = stream;
+      video.play().catch((err) => {
+        console.warn("[VIEWER] Autoplay blocked:", err);
+        setAutoplayBlocked(true);
+      });
       
-      // Track unique streams and assign based on explicit stream IDs from metadata
-      if (!streamMap.has(stream.id)) {
-        streamMap.set(stream.id, stream);
-        
-        // Use metadata to identify streams if available
-        if (metadata?.hostStreamId && stream.id === metadata.hostStreamId && !hostStreamAssigned) {
-          if (hostVideoRef.current) {
-            const videoEl = hostVideoRef.current;
-            videoEl.srcObject = stream;
-            videoEl.muted = true;
-            videoEl.playsInline = true;
-            
-            // Explicit play with autoplay guard
-            videoEl.play().catch((err) => {
-              console.warn("[VIEWER] Autoplay blocked:", err);
-              setAutoplayBlocked(true);
-            });
-            
-            hostStreamAssigned = true;
-            
-            // NO_FRAMES detection: Check if framesDecoded stays 0 for 3s
-            if (event.track.kind === 'video') {
-              setTimeout(async () => {
-                const stats = await pc.getStats();
-                let framesDecoded = 0;
-                stats.forEach((stat: any) => {
-                  if (stat.type === 'inbound-rtp' && stat.kind === 'video') {
-                    framesDecoded = stat.framesDecoded || 0;
-                  }
-                });
-                
-                if (framesDecoded === 0) {
-                  console.error("❌ NO_FRAMES: framesDecoded=0 after 3s");
-                  // Request keyframe
-                  if (event.receiver && 'requestKeyFrame' in event.receiver) {
-                    (event.receiver as any).requestKeyFrame?.();
-                  }
-                } else if (videoEl.readyState < 2) {
-                  // ELEMENT_PLAY_FAILED: frames increase but video element is black
-                  console.error("❌ ELEMENT_PLAY_FAILED: framesDecoded>0 but video not ready, retrying play()");
-                  videoEl.play().catch(() => {});
-                }
-              }, 3000);
+      console.log(`[VIEWER] ontrack: attached stream ${stream.id}`);
+      
+      // Request keyframe immediately
+      requestKeyFrame(pc);
+      
+      // 5. NO_FRAMES watchdog: Check if framesDecoded stays 0 after 3s
+      if (e.track.kind === 'video') {
+        setTimeout(async () => {
+          const stats = await pc.getStats();
+          let framesDecoded = 0;
+          let frameWidth = 0;
+          let frameHeight = 0;
+          
+          stats.forEach((stat: any) => {
+            if (stat.type === 'inbound-rtp' && stat.kind === 'video') {
+              framesDecoded = stat.framesDecoded || 0;
+              frameWidth = stat.frameWidth || 0;
+              frameHeight = stat.frameHeight || 0;
             }
-          }
-        } else if (metadata?.guestStreamId && stream.id === metadata.guestStreamId && !guestStreamAssigned) {
-          if (guestVideoRef.current) {
-            guestVideoRef.current.srcObject = stream;
-            guestVideoRef.current.muted = true;
-            guestVideoRef.current.playsInline = true;
-            guestVideoRef.current.play().catch(() => {});
-            guestStreamAssigned = true;
-          }
-        } else if (!metadata) {
-          // Fallback: if no metadata, assign first stream to host, second to guest
-          const streamIds = Array.from(streamMap.keys());
-          if (streamIds.length === 1 && !hostStreamAssigned) {
-            if (hostVideoRef.current) {
-              const videoEl = hostVideoRef.current;
-              videoEl.srcObject = stream;
-              videoEl.muted = true;
-              videoEl.playsInline = true;
-              videoEl.play().catch(() => setAutoplayBlocked(true));
-              hostStreamAssigned = true;
+          });
+          
+          console.log(`[VIEWER] framesDecoded=${framesDecoded} w×h=${frameWidth}×${frameHeight}`);
+          
+          if (framesDecoded === 0) {
+            console.error("❌ NO_FRAMES: framesDecoded=0 after 3s, requesting keyframe");
+            // Send WS message to host to generate keyframe
+            if (wsRef.current?.readyState === WebSocket.OPEN) {
+              wsRef.current.send(JSON.stringify({
+                type: 'request_keyframe',
+                streamId,
+                toUserId: 'host'
+              }));
             }
-          } else if (streamIds.length === 2 && !guestStreamAssigned) {
-            if (guestVideoRef.current) {
-              guestVideoRef.current.srcObject = stream;
-              guestVideoRef.current.muted = true;
-              guestVideoRef.current.playsInline = true;
-              guestVideoRef.current.play().catch(() => {});
-              guestStreamAssigned = true;
-            }
+            requestKeyFrame(pc);
+          } else if (video.readyState < 2) {
+            console.error("❌ ELEMENT_PLAY_FAILED: framesDecoded>0 but video not ready, retrying play()");
+            video.play().catch(() => {});
           }
-        }
+        }, 3000);
       }
     };
     
@@ -592,42 +566,43 @@ export default function Viewer() {
       }
     };
     
-    // Monitor connection state for ICE restart
+    // Monitor connection state
     pc.onconnectionstatechange = () => {
+      console.log(`[VIEWER] connectionState: ${pc.connectionState}`);
       if (pc.connectionState === 'connected') {
-        // Connection succeeded - clear recovery state
         clearRecoveryState('host');
       } else if (pc.connectionState === 'failed' || pc.connectionState === 'disconnected') {
-        // Connection failed - attempt recovery with exponential backoff (2s, 4s, 8s)
         attemptRecovery('host', pc);
       }
     };
     
-    // Monitor ICE connection state for transport stability
     pc.oniceconnectionstatechange = () => {
+      console.log(`[VIEWER] iceConnectionState: ${pc.iceConnectionState}`);
       if (pc.iceConnectionState === 'disconnected' || pc.iceConnectionState === 'failed') {
-        console.log('⚠️  ICE connection degraded, connection may recover automatically');
+        console.log('⚠️  ICE connection degraded, may recover automatically');
       }
     };
     
     console.log("[VIEWER] Received webrtc_offer from host");
     
-    // Apply SDP munging to force H.264 only (strip VP8/VP9/AV1)
+    // 6. Apply SDP munging if setCodecPreferences wasn't available
     let mungedSdp = sdp;
-    if (sdp.sdp) {
+    if (!h264Forced && sdp.sdp) {
       mungedSdp = { ...sdp, sdp: forceH264OnlySDP(sdp.sdp) };
+      console.log("[VIEWER] Forced H.264 via SDP munging");
     }
     
     await pc.setRemoteDescription(new RTCSessionDescription(mungedSdp));
+    console.log("[VIEWER] setRemoteDescription(offer) done");
+    
     const answer = await pc.createAnswer();
-    // Enable OPUS FEC/DTX for audio resilience
     if (answer.sdp) {
       answer.sdp = enableOpusFecDtx(answer.sdp);
     }
     await pc.setLocalDescription(answer);
     console.log("[VIEWER] Sending webrtc_answer to host");
     
-    // Log selected codec after negotiation
+    // Log negotiated codec
     const transceivers = pc.getTransceivers();
     for (const transceiver of transceivers) {
       if (transceiver.currentDirection && transceiver.receiver.track?.kind === 'video') {
@@ -1002,20 +977,24 @@ export default function Viewer() {
           </>
         )}
         
-        {/* Debug HUD (shown when ?debug=1) */}
-        {showDebugHUD && isJoined && (
+        {/* Debug HUD (always visible) */}
+        {isJoined && (
           <DebugHUD
             pc={hostPcRef.current}
             onRequestKeyframe={() => {
-              if (hostPcRef.current) {
-                requestKeyFrame(hostPcRef.current);
+              // Send WS message to host to trigger keyframe generation
+              if (wsRef.current?.readyState === WebSocket.OPEN) {
+                wsRef.current.send(JSON.stringify({
+                  type: 'request_keyframe',
+                  streamId,
+                  toUserId: 'host'
+                }));
                 toast({
                   title: 'Keyframe Requested',
-                  description: 'Sent PLI request to host',
+                  description: 'Sent request to host',
                 });
               }
             }}
-            onClose={() => setShowDebugHUD(false)}
           />
         )}
       </div>

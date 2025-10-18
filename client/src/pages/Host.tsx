@@ -227,6 +227,24 @@ export default function Host() {
             title: 'Co-host Ended',
             description: 'The guest has left the stream',
           });
+        } else if (msg.type === 'request_keyframe' && msg.fromUserId) {
+          // Viewer requesting keyframe (likely NO_FRAMES watchdog triggered)
+          console.log(`[HOST] Keyframe request from viewer ${msg.fromUserId.substring(0, 8)}`);
+          const pc = viewerPcs.current.get(msg.fromUserId);
+          if (pc) {
+            const senders = pc.getSenders();
+            for (const sender of senders) {
+              if (sender.track?.kind === 'video') {
+                try {
+                  // @ts-ignore - generateKeyFrame is experimental
+                  await sender.generateKeyFrame?.();
+                  console.log(`[HOST] Generated keyframe for viewer ${msg.fromUserId.substring(0, 8)}`);
+                } catch (err) {
+                  console.warn(`[HOST] Failed to generate keyframe for viewer ${msg.fromUserId.substring(0, 8)}:`, err);
+                }
+              }
+            }
+          }
         } else if (msg.type === 'game_state' && msg.version) {
           setGameState(prev => ({
             version: msg.version,
@@ -417,14 +435,30 @@ export default function Host() {
       }
     }
     
-    // Check if viewer is iOS/Safari and prefer H.264
-    const viewerPlatform = viewerPlatforms.current.get(viewerUserId);
-    const isIOSSafari = viewerPlatform?.isIOSSafari || false;
+    // Force H.264 for ALL viewers (debug mode)
+    console.log(`[HOST] Forcing H.264 for viewer ${viewerUserId.substring(0, 8)}`);
     
-    if (isIOSSafari) {
-      // For iOS/Safari viewers, prefer H.264 to ensure compatibility
-      console.log(`📱 iOS/Safari viewer detected (${viewerUserId.substring(0, 8)}), preferring H.264`);
-      setCodecPreferences(pc, 'video', ['video/H264', 'video/VP9', 'video/VP8']);
+    // Try setCodecPreferences first
+    let h264Forced = false;
+    const transceivers = pc.getTransceivers();
+    for (const transceiver of transceivers) {
+      if (transceiver.sender.track?.kind === 'video' && transceiver.setCodecPreferences) {
+        try {
+          const capabilities = RTCRtpSender.getCapabilities?.('video');
+          if (capabilities && capabilities.codecs) {
+            const h264Codecs = capabilities.codecs.filter(codec =>
+              codec.mimeType.toLowerCase() === 'video/h264'
+            );
+            if (h264Codecs.length > 0) {
+              transceiver.setCodecPreferences(h264Codecs);
+              h264Forced = true;
+              console.log(`[HOST] Forced H.264 via setCodecPreferences for viewer ${viewerUserId.substring(0, 8)}`);
+            }
+          }
+        } catch (err) {
+          console.warn(`[HOST] setCodecPreferences failed for viewer ${viewerUserId.substring(0, 8)}, will use SDP munging:`, err);
+        }
+      }
     }
     
     // Initialize quality settings (codec prefs, bitrate, audio quality) with monitoring
@@ -454,13 +488,17 @@ export default function Host() {
     candidateHandlerCleanups.current.set(viewerUserId, cleanupCandidateHandler);
     
     const offer = await pc.createOffer();
-    // Enable OPUS FEC/DTX for audio resilience + Force H.264 only
+    // Enable OPUS FEC/DTX for audio resilience
     if (offer.sdp) {
       offer.sdp = enableOpusFecDtx(offer.sdp);
-      offer.sdp = forceH264OnlySDP(offer.sdp);
+      // Apply SDP munging only if setCodecPreferences failed
+      if (!h264Forced) {
+        offer.sdp = forceH264OnlySDP(offer.sdp);
+        console.log(`[HOST] Forced H.264 via SDP munging for viewer ${viewerUserId.substring(0, 8)}`);
+      }
     }
     await pc.setLocalDescription(offer);
-    console.log("[HOST] Sending webrtc_offer to", viewerUserId);
+    console.log(`[HOST] offer → viewer ${viewerUserId.substring(0, 8)} (h264-only=${h264Forced || !!offer.sdp})`);
     
     // Request keyframe for faster first frame on viewer join
     // Also handle ICE failures with restart
@@ -498,6 +536,20 @@ export default function Host() {
         guestStreamId: guestStreamRef.current?.id
       }
     }));
+    
+    // Keyframe hygiene: Generate keyframe after sending offer
+    const senders = pc.getSenders();
+    for (const sender of senders) {
+      if (sender.track?.kind === 'video') {
+        try {
+          // @ts-ignore - generateKeyFrame is experimental
+          await sender.generateKeyFrame?.();
+          console.log(`[HOST] Generated keyframe for viewer ${viewerUserId.substring(0, 8)}`);
+        } catch (err) {
+          // Ignore errors - some browsers don't support this
+        }
+      }
+    }
   }
 
   async function handleGuestOffer(guestUserId: string, sdp: RTCSessionDescriptionInit) {

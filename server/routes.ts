@@ -95,45 +95,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   app.get('/healthz', (_req, res) => {
-    // Enhanced health endpoint with connection summary
-    const summary = {
-      ok: true,
-      timestamp: new Date().toISOString(),
-      stats: {
-        totalRooms: rooms.size,
-        rooms: Array.from(rooms.entries()).map(([streamId, roomState]) => ({
-          streamId,
-          totalParticipants: roomState.participants.size,
-          roles: {
-            hosts: Array.from(roomState.participants.values()).filter(p => p.role === 'host').length,
-            viewers: Array.from(roomState.participants.values()).filter(p => p.role === 'viewer').length,
-            guests: Array.from(roomState.participants.values()).filter(p => p.role === 'guest').length
-          },
-          viewers: Array.from(roomState.participants.values())
-            .filter((p: any) => p.role === 'viewer')
-            .map((p: any) => ({
-              userId: p.userId.substring(0, 8),
-              isIOSSafari: p.isIOSSafari || false,
-              expectedCodec: p.isIOSSafari ? 'H264' : 'VP9'
-            })),
-          activeGuestId: roomState.activeGuestId,
-          cohostQueueSize: roomState.cohostQueue.length,
-          game: roomState.gameState.gameId ? {
-            gameId: roomState.gameState.gameId,
-            version: roomState.gameState.version,
-            active: roomState.gameState.data !== null
-          } : null
-        }))
-      },
-      lastValidation: latestValidationReport ? {
-        timestamp: latestValidationReport.timestamp,
-        overallStatus: latestValidationReport.overallStatus,
-        duration: latestValidationReport.duration,
-        passedTests: latestValidationReport.scenarios?.filter((s: any) => s.status === 'pass').length || 0,
-        totalTests: latestValidationReport.scenarios?.length || 0
-      } : null
-    };
-    res.json(summary);
+    // Minimal health endpoint with room summary (H.264-only debug mode)
+    res.json({
+      rooms: Array.from(rooms.entries()).map(([id, roomState]) => ({
+        id,
+        viewersCount: Array.from(roomState.participants.values()).filter(p => p.role === 'viewer').length,
+        h264Only: true
+      }))
+    });
   });
 
   app.get('/_version', (_req, res) => {

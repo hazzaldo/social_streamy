@@ -1,0 +1,121 @@
+Please implement this “Minimum Viable Playback + Cohost fix” now
+
+Goal: Make /viewer/demo show Host video on every browser (iOS/desktop), and make co-host requests arrive on Host.
+
+A) Minimal WebRTC path (single transceiver, H.264-only, hard logs)
+
+Viewer.tsx – replace receive logic with this exact sequence
+
+Create new RTCPeerConnection (no reuse).
+
+pc.addTransceiver('video', { direction: 'recvonly' });
+
+Before setRemoteDescription, force H.264 only:
+
+If RTCRtpTransceiver.setCodecPreferences exists, filter getCapabilities('video').codecs to only H.264 (mimeType video/H264), then call setCodecPreferences([onlyH264]) on the video transceiver.
+
+Else, munge SDP in the incoming offer to keep only H.264 payloads.
+
+await pc.setRemoteDescription(offer);
+
+const answer = await pc.createAnswer();
+
+await pc.setLocalDescription(answer);
+
+send answer.
+
+pc.ontrack = (e) => {
+
+const [stream] = e.streams;
+
+video.muted = true; video.playsInline = true;
+
+video.srcObject = stream;
+
+video.play().catch(()=>{});
+
+console.log('[VIEWER] ontrack: attached stream', stream?.id);
+
+requestKeyFrame();
+
+};
+
+Add a 5s watchdog: if no ontrack fired → console.error('NO_ONTRACK').
+
+Add a 3s watchdog after ontrack: poll getStats(); if framesDecoded === 0 → request keyframe again and log NO_FRAMES.
+
+Host.tsx – per-viewer sender with single transceiver
+
+For each viewer: reuse or create pc.
+
+Ensure exactly one pc.addTransceiver('video', { direction: 'sendonly' }) total (no simulcast/SVC for now).
+
+Prefer H.264 in the offer:
+
+Use sender.getCapabilities('video').codecs → filter to H.264 and call transceiver.setCodecPreferences([onlyH264]) if available; else munge the local SDP after createOffer() to H.264 only (keep profile-level-id=42e01f).
+
+await pc.setLocalDescription(offer); send offer;
+
+On pc.oniceconnectionstatechange, log state transitions.
+
+Keyframe hygiene
+
+After sending an offer (new viewer or renegotiation), call sender.generateKeyFrame?.() (ignore errors).
+
+On viewer NO_FRAMES watchdog, send a WS message to host to trigger a keyframe; host should call sender.generateKeyFrame?.() for that viewer.
+
+Debug HUD (guaranteed to show)
+
+Render a small fixed box always (no query param) in the top-right of Viewer.tsx with:
+
+pc.iceConnectionState, pc.connectionState
+
+Negotiated codec (parse pc.getStats() inbound-rtp → codecId → codec.mimeType)
+
+framesDecoded, frameWidth x frameHeight
+
+A “Request Keyframe” button → calls sender.generateKeyFrame via WS request.
+
+Update every 500 ms.
+
+B) Fix co-host signaling end-to-end
+
+Router: Ensure cohost_request from viewer is forwarded to host in the same room/streamId. Log: router: cohost_request {room, fromUser}.
+
+Host.tsx: Subscribe to cohost_request; push into a queue/list and show a visible card/button “Approve”. Log: [HOST] cohost_request from ${userId}.
+
+Viewer.tsx: After clicking “Request Co-host”, show “Waiting for host approval…”, and listen for cohost_approved.
+
+C) Instrumentation (so we can see what’s wrong if it still fails)
+
+Console logs to add (both sides):
+
+[HOST] offer → viewer ${userId} (h264-only=${bool})
+
+[VIEWER] setRemoteDescription(offer) done
+
+[VIEWER] ontrack fired
+
+[VIEWER] framesDecoded=${n} w×h=${w}×${h} codec=${codec}
+
+[ROUTER] cohost_request received room=${id} from=${user} and [HOST] cohost_request received
+
+/healthz: add minimal JSON: { rooms:[{ id, viewersCount, h264Only:true }] }
+
+D) Quick acceptance test (I will run)
+
+Open /host/demo → Go Live.
+
+Open /viewer/demo on desktop Chrome and on iPhone Safari.
+
+Expect within 3 s on each viewer:
+
+HUD visible; codec shows H264.
+
+framesDecoded > 0, video renders.
+
+Click Request Co-host on viewer → Host sees a card to Approve.
+
+If anything fails, paste the console group around:
+
+[VIEWER] setRemoteDescription…, [VIEWER] ontrack…, stats line with framesDecoded, and the HUD values.
