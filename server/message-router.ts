@@ -1,27 +1,50 @@
 import { WebSocket } from 'ws';
-import { MetricsTracker } from './signaling-utils';
+import { MetricsTracker, MessageDeduplicator, TokenBucketRateLimiter } from './signaling-utils';
 
 // Message envelope schema
 interface MessageEnvelope {
   type: string;
   msgId?: string;
+  seq?: number; // Per-sender sequence number
   [key: string]: any;
 }
 
-// Per-type payload schemas
+// Per-sender sequence tracking
+interface SequenceState {
+  lastSeq: number;
+  outOfOrder: number; // Count of out-of-order messages
+}
+
+// Per-type payload schemas (Wave 1 types aligned with legacy field names)
 const MESSAGE_SCHEMAS: Record<string, {
   required: string[];
   optional?: string[];
   maxLengths?: Record<string, number>;
 }> = {
+  // Wave 1: Critical signaling types
   join_stream: {
     required: ['streamId', 'userId'],
     maxLengths: { streamId: 100, userId: 100 }
   },
   resume: {
     required: ['sessionToken'],
-    maxLengths: { sessionToken: 200 }
+    optional: ['roomId'],
+    maxLengths: { sessionToken: 200, roomId: 100 }
   },
+  webrtc_offer: {
+    required: ['toUserId', 'fromUserId', 'sdp'],
+    maxLengths: { toUserId: 100, fromUserId: 100 }
+  },
+  webrtc_answer: {
+    required: ['toUserId', 'fromUserId', 'sdp'],
+    maxLengths: { toUserId: 100, fromUserId: 100 }
+  },
+  ice_candidate: {
+    required: ['toUserId', 'fromUserId', 'candidate'],
+    maxLengths: { toUserId: 100, fromUserId: 100 }
+  },
+  
+  // Future waves (placeholders)
   ping: {
     required: []
   },
@@ -31,10 +54,6 @@ const MESSAGE_SCHEMAS: Record<string, {
   },
   answer: {
     required: ['targetUserId', 'sdp'],
-    maxLengths: { targetUserId: 100 }
-  },
-  ice_candidate: {
-    required: ['targetUserId', 'candidate'],
     maxLengths: { targetUserId: 100 }
   },
   cohost_request: {
@@ -95,6 +114,14 @@ export interface MessageContext {
   socketId: string;
   metrics: MetricsTracker;
   debugSdp: boolean;
+  // Wave 1 context additions
+  rooms?: Map<string, any>;
+  sessionManager?: any;
+  currentParticipant?: any;
+  iceCandidateRateLimiter?: TokenBucketRateLimiter;
+  coalescer?: any;
+  relayToUser?: (userId: string, message: any) => void;
+  broadcastToRoom?: (streamId: string, message: any) => void;
 }
 
 // Message router class
@@ -102,10 +129,13 @@ export class MessageRouter {
   private handlers: Map<string, MessageHandler> = new Map();
   private metrics: MetricsTracker;
   private debugSdp: boolean;
+  private deduplicator: MessageDeduplicator;
+  private sequences: Map<string, SequenceState> = new Map();
 
   constructor(metrics: MetricsTracker, debugSdp: boolean = false) {
     this.metrics = metrics;
     this.debugSdp = debugSdp;
+    this.deduplicator = new MessageDeduplicator();
   }
 
   // Register a handler for a message type
@@ -197,7 +227,7 @@ export class MessageRouter {
   }
 
   // Route incoming message (returns true if handled, false if should fall back to legacy)
-  async route(ws: WebSocket, message: MessageEnvelope, socketId: string): Promise<boolean> {
+  async route(ws: WebSocket, message: MessageEnvelope, socketId: string, context?: Partial<MessageContext>): Promise<boolean> {
     const startTime = Date.now();
 
     // Validate payload (check if we have a schema for this type)
@@ -211,7 +241,33 @@ export class MessageRouter {
     // Schema exists but validation failed - reject
     if (!payloadResult.valid) {
       this.sendError(ws, 'invalid_request', payloadResult.error!, message.msgId);
+      this.metrics.increment('errors_total', { code: 'invalid_request', type: message.type });
       return true; // Handled (rejected)
+    }
+
+    // Wave 1: msgId deduplication
+    if (message.msgId) {
+      if (this.deduplicator.isDuplicate(socketId, message.msgId)) {
+        console.log(`[Router] Duplicate msgId detected: ${message.msgId}`);
+        this.metrics.increment('msgs_duplicate_total', { type: message.type });
+        return true; // Handled (duplicate dropped)
+      }
+    }
+
+    // Wave 1: Per-sender sequence tracking (optional, warn if out of order)
+    if (message.seq !== undefined) {
+      const seqKey = socketId;
+      if (!this.sequences.has(seqKey)) {
+        this.sequences.set(seqKey, { lastSeq: message.seq, outOfOrder: 0 });
+      } else {
+        const seqState = this.sequences.get(seqKey)!;
+        if (message.seq <= seqState.lastSeq) {
+          seqState.outOfOrder++;
+          console.warn(`[Router] Out-of-order message: expected seq > ${seqState.lastSeq}, got ${message.seq}`);
+          this.metrics.increment('msgs_out_of_order_total', { type: message.type });
+        }
+        seqState.lastSeq = Math.max(seqState.lastSeq, message.seq);
+      }
     }
 
     // Find handler
@@ -223,12 +279,13 @@ export class MessageRouter {
 
     // Execute handler
     try {
-      const context: MessageContext = {
+      const fullContext: MessageContext = {
         socketId,
         metrics: this.metrics,
-        debugSdp: this.debugSdp
+        debugSdp: this.debugSdp,
+        ...context
       };
-      await handler(ws, message, context);
+      await handler(ws, message, fullContext);
       
       // Track processing time
       const duration = Date.now() - startTime;
@@ -237,8 +294,14 @@ export class MessageRouter {
     } catch (error) {
       console.error(`[Router] Handler error for ${message.type}:`, error);
       this.sendError(ws, 'internal_error', 'Internal server error', message.msgId);
-      this.metrics.increment('errors_total', { code: 'internal_error' });
+      this.metrics.increment('errors_total', { code: 'internal_error', type: message.type });
       return true; // Handled (with error)
     }
+  }
+
+  // Cleanup resources for a disconnected socket
+  cleanup(socketId: string) {
+    this.deduplicator.cleanup(socketId);
+    this.sequences.delete(socketId);
   }
 }

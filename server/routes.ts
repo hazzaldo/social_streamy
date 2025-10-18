@@ -14,6 +14,13 @@ import {
 import { GracefulShutdown } from "./graceful-shutdown";
 import { validateWebSocketOrigin } from "./security";
 import { MessageRouter } from "./message-router";
+import {
+  handleJoinStream,
+  handleResume,
+  handleWebRTCOffer,
+  handleWebRTCAnswer,
+  handleICECandidate
+} from "./wave1-handlers";
 
 // In-memory room and participant tracking
 interface Participant {
@@ -65,6 +72,13 @@ const payloadValidator = new PayloadValidator();
 const ROUTER_ENABLED = process.env.ROUTER_ENABLED !== 'false'; // Default: true
 const DEBUG_SDP = process.env.DEBUG_SDP === 'true'; // Default: false
 const router = new MessageRouter(metrics, DEBUG_SDP);
+
+// Wave 1: Register critical signaling handlers
+router.register('join_stream', handleJoinStream);
+router.register('resume', handleResume);
+router.register('webrtc_offer', handleWebRTCOffer);
+router.register('webrtc_answer', handleWebRTCAnswer);
+router.register('ice_candidate', handleICECandidate);
 
 // Rate limiters
 const iceCandidateRateLimiter = new TokenBucketRateLimiter(50, 50, 100); // 50/sec, burst 100
@@ -239,26 +253,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       console.log('📩 WS Message:', msg.type, msg);
 
-      // Phase 2: Try router first if enabled (shim pattern - reuse already-parsed message)
-      let handled = false;
-      if (ROUTER_ENABLED) {
-        try {
-          handled = await router.route(ws, msg, socketId);
-          if (handled) {
-            metrics.increment('msgs_handled_total', { handled_by: 'router', type: msg.type });
-            return; // Router handled it, skip legacy
-          }
-        } catch (error) {
-          console.error('[Shim] Router error, falling back to legacy:', error);
-          metrics.increment('router_errors');
-        }
-      }
-
-      // If router didn't handle or disabled, use legacy switch
-      if (!handled) {
-        metrics.increment('msgs_handled_total', { handled_by: 'legacy', type: msg.type });
-      }
-
+      // Helper functions for both router and legacy paths
       // Helper function to send message with backpressure check and ack
       const sendMessage = (targetWs: WebSocket, message: any, critical: boolean = true) => {
         if (targetWs.readyState !== WebSocket.OPEN) return false;
@@ -295,6 +290,70 @@ export async function registerRoutes(app: Express): Promise<Server> {
           message
         }, true);
       };
+
+      // Helper functions for routing (used by both router and legacy)
+      const relayToUser = (userId: string, message: any) => {
+        for (const roomState of Array.from(rooms.values())) {
+          const participant = roomState.participants.get(String(userId));
+          if (participant && participant.ws.readyState === WebSocket.OPEN) {
+            sendMessage(participant.ws, message);
+            return true;
+          }
+        }
+        console.warn('⚠️ User not found for relay:', userId);
+        return false;
+      };
+
+      const broadcastToRoom = (streamId: string, message: any) => {
+        const roomState = rooms.get(streamId);
+        if (!roomState) {
+          console.warn('⚠️ Room not found for broadcast:', streamId);
+          return;
+        }
+        for (const participant of Array.from(roomState.participants.values())) {
+          if (participant.ws.readyState === WebSocket.OPEN) {
+            sendMessage(participant.ws, message);
+          }
+        }
+      };
+
+      // Phase 2: Try router first if enabled (shim pattern - reuse already-parsed message)
+      let handled = false;
+      if (ROUTER_ENABLED) {
+        try {
+          // Build context for Wave 1 handlers (pass mutable ref wrapper for currentParticipant)
+          const participantRef = { current: currentParticipant };
+          const routerContext = {
+            rooms,
+            sessionManager,
+            currentParticipant: participantRef,
+            iceCandidateRateLimiter,
+            coalescer,
+            relayToUser,
+            broadcastToRoom
+          };
+          
+          handled = await router.route(ws, msg, socketId, routerContext);
+          
+          // Update closure variable if handler modified it
+          if (participantRef.current !== currentParticipant) {
+            currentParticipant = participantRef.current;
+          }
+          
+          if (handled) {
+            metrics.increment('msgs_handled_total', { handled_by: 'router', type: msg.type });
+            return; // Router handled it, skip legacy
+          }
+        } catch (error) {
+          console.error('[Shim] Router error, falling back to legacy:', error);
+          metrics.increment('router_errors');
+        }
+      }
+
+      // If router didn't handle or disabled, use legacy switch
+      if (!handled) {
+        metrics.increment('msgs_handled_total', { handled_by: 'legacy', type: msg.type });
+      }
 
       switch (msg.type) {
         case 'ping': {
