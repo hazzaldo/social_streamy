@@ -206,6 +206,17 @@ export default function Host() {
             pendingViewersRef.current.add(msg.userId);
             console.log('[HOST] queued viewer until Go Live:', msg.userId);
           }
+        } else if (msg.type === 'request_offer' && msg.fromUserId) {
+          // Viewer explicitly asked for an offer — create one if live, else queue
+          if (isLive && localStreamRef.current) {
+            await createViewerConnection(msg.fromUserId);
+          } else {
+            pendingViewersRef.current.add(msg.fromUserId);
+            console.log(
+              '[HOST] queued viewer via request_offer until Go Live:',
+              msg.fromUserId
+            );
+          }
         } else if (msg.type === 'webrtc_answer' && msg.fromUserId) {
           const pc = viewerPcs.current.get(msg.fromUserId);
           if (!pc) {
@@ -344,24 +355,6 @@ export default function Host() {
             data: msg.full ? msg.patch : { ...prev.data, ...msg.patch },
             gameId: prev.gameId
           }));
-        } else if (msg.type === 'request_offer' && msg.fromUserId) {
-          const viewerId = msg.fromUserId;
-          console.log('[HOST] request_offer from', viewerId);
-
-          // if we already built a PC for this viewer, ignore
-          if (viewerPcs.current.has(viewerId)) {
-            console.log(
-              '[HOST] PC already exists for',
-              viewerId,
-              '— ignoring request_offer'
-            );
-          } else if (isLive && localStreamRef.current) {
-            await createViewerConnection(viewerId); // send webrtc_offer → viewer
-          } else {
-            // host isn’t live yet — queue and flush in goLive()
-            pendingViewersRef.current.add(viewerId);
-            console.log('[HOST] queued viewer until Go Live:', viewerId);
-          }
         }
       };
     }
@@ -729,10 +722,12 @@ export default function Host() {
         type: 'webrtc_offer',
         streamId,
         toUserId: viewerUserId,
+        fromUserId: userId, // ✅ host’s actual userId
         sdp: offer,
         metadata: {
           hostStreamId: localStreamRef.current?.id,
-          guestStreamId: guestStreamRef.current?.id
+          guestStreamId: guestStreamRef.current?.id,
+          hostUserId: userId // ✅ include for the viewer to echo back
         }
       })
     );
@@ -867,6 +862,7 @@ export default function Host() {
         type: 'cohost_answer',
         streamId,
         toUserId: guestUserId,
+        fromUserId: userId,
         sdp: answer
       })
     );
@@ -974,10 +970,12 @@ export default function Host() {
               type: 'webrtc_offer',
               streamId,
               toUserId: viewerUserId,
+              fromUserId: userId, // ✅
               sdp: offer,
               metadata: {
                 hostStreamId: localStreamRef.current?.id,
-                guestStreamId: guestStreamRef.current?.id
+                guestStreamId: guestStreamRef.current?.id,
+                hostUserId: userId // ✅
               }
             })
           );
@@ -1131,7 +1129,8 @@ export default function Host() {
       JSON.stringify({
         type: 'cohost_accept',
         streamId,
-        userId: requestUserId
+        userId: requestUserId,
+        fromUserId: userId
       })
     );
   }
@@ -1141,7 +1140,8 @@ export default function Host() {
       JSON.stringify({
         type: 'cohost_decline',
         streamId,
-        userId: requestUserId
+        userId: requestUserId,
+        fromUserId: userId
       })
     );
   }
@@ -1152,7 +1152,8 @@ export default function Host() {
     wsRef.current?.send(
       JSON.stringify({
         type: newState ? 'cohost_mute' : 'cohost_unmute',
-        streamId
+        streamId,
+        fromUserId: userId
       })
     );
   }
@@ -1163,7 +1164,8 @@ export default function Host() {
     wsRef.current?.send(
       JSON.stringify({
         type: newState ? 'cohost_cam_off' : 'cohost_cam_on',
-        streamId
+        streamId,
+        fromUserId: userId
       })
     );
   }
@@ -1205,7 +1207,8 @@ export default function Host() {
       JSON.stringify({
         type: 'cohost_ended',
         streamId,
-        by: 'host'
+        by: 'host',
+        fromUserId: userId
       })
     );
 
@@ -1220,7 +1223,8 @@ export default function Host() {
         type: 'game_init',
         streamId,
         gameId: selectedGame,
-        initialState
+        initialState,
+        fromUserId: userId
       })
     );
 

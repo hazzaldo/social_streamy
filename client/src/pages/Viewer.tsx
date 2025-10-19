@@ -56,6 +56,7 @@ type GameState = {
 };
 
 export default function Viewer() {
+  const hostIdRef = useRef<string | null>(null);
   const [, params] = useRoute('/viewer/:id');
   const streamId = params?.id || 'default';
   const userId = useRef(String(Math.floor(Math.random() * 1e8))).current;
@@ -178,7 +179,7 @@ export default function Viewer() {
             JSON.stringify({
               type: 'ice_candidate',
               streamId,
-              toUserId: 'host',
+              toUserId: hostIdRef.current ?? 'host', // ✅ fallback use the same real host id
               fromUserId: userId,
               candidate: event.candidate
             })
@@ -224,7 +225,7 @@ export default function Viewer() {
         JSON.stringify({
           type: 'cohost_offer',
           streamId,
-          toUserId: 'host',
+          toUserId: hostIdRef.current ?? 'host', // ✅
           fromUserId: userId,
           sdp: offer
         })
@@ -293,30 +294,14 @@ export default function Viewer() {
           })
         );
 
-        // 👇 Immediately and explicitly ask the host for an offer
         ws.send(
           JSON.stringify({
             type: 'request_offer',
             streamId,
-            toUserId: 'host',
+            toUserId: hostIdRef.current ?? 'host',
             fromUserId: userId
           })
         );
-
-        // simple 2s watchdog to retry once if no offer yet
-        setTimeout(() => {
-          if (!hostPcRef.current) {
-            console.log('[VIEWER] No offer yet, re-requesting...');
-            wsRef.current?.send(
-              JSON.stringify({
-                type: 'request_offer',
-                streamId,
-                toUserId: 'host',
-                fromUserId: userId
-              })
-            );
-          }
-        }, 2000);
 
         // Start heartbeat
         if (heartbeatIntervalRef.current != null) {
@@ -752,8 +737,16 @@ export default function Viewer() {
   /*******  b82d3833-8c7c-48c0-a715-0cf144c42f6c  *******/
   async function handleHostOffer(
     sdp: RTCSessionDescriptionInit,
-    metadata?: { hostStreamId?: string; guestStreamId?: string }
+    metadata?: {
+      hostStreamId?: string;
+      guestStreamId?: string;
+      hostUserId?: string;
+    }
   ) {
+    if (metadata?.hostUserId) {
+      hostIdRef.current = metadata.hostUserId; // ✅ remember host’s id
+    }
+
     // 1) New PC
     if (hostPcRef.current) hostPcRef.current.close();
     const pc = new RTCPeerConnection(ICE_CONFIG);
@@ -780,7 +773,7 @@ export default function Viewer() {
           JSON.stringify({
             type: 'ice_candidate',
             streamId,
-            toUserId: 'host',
+            toUserId: hostIdRef.current, // ✅ use the real host id
             fromUserId: userId,
             candidate: event.candidate
           })
@@ -813,7 +806,7 @@ export default function Viewer() {
       JSON.stringify({
         type: 'webrtc_answer',
         streamId,
-        toUserId: 'host',
+        toUserId: hostIdRef.current, // ✅ send back to the *actual* host id
         fromUserId: userId,
         sdp: answer
       })
@@ -831,7 +824,8 @@ export default function Viewer() {
       JSON.stringify({
         type: 'cohost_request',
         streamId,
-        userId
+        userId,
+        fromUserId: userId // add this for consistency with other messages
       })
     );
 
@@ -1100,7 +1094,8 @@ export default function Viewer() {
                   JSON.stringify({
                     type: 'request_keyframe',
                     streamId,
-                    toUserId: 'host'
+                    toUserId: hostIdRef.current ?? 'host', // ✅ route to actual host
+                    fromUserId: userId // ✅ so Host can find the PC
                   })
                 );
                 toast({
