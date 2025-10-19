@@ -87,15 +87,10 @@ export default function Viewer() {
   const guestPcRef = useRef<RTCPeerConnection | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
   ///////////////////////////////////////////////////////////////////////////////////////////////////////
-  const heartbeatIntervalRef = useRef<ReturnType<typeof setInterval> | null>(
-    null
-  );
-  const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(
-    null
-  );
-  const recoveryTimeouts = useRef<Map<string, ReturnType<typeof setTimeout>>>(
-    new Map()
-  );
+  const heartbeatIntervalRef = useRef<number | null>(null);
+  const reconnectTimeoutRef = useRef<number | null>(null);
+  const recoveryTimeouts = useRef<Map<string, number>>(new Map());
+
   ///////////////////////////////////////////////////////////////////////////////////////////////////////
   const reconnectAttemptsRef = useRef(0);
   const roleRef = useRef<Role>('viewer');
@@ -286,10 +281,11 @@ export default function Viewer() {
         );
 
         // Start heartbeat
-        if (heartbeatIntervalRef.current) {
-          clearInterval(heartbeatIntervalRef.current);
+        if (heartbeatIntervalRef.current != null) {
+          window.clearInterval(heartbeatIntervalRef.current);
+          heartbeatIntervalRef.current = null;
         }
-        heartbeatIntervalRef.current = setInterval(() => {
+        heartbeatIntervalRef.current = window.setInterval(() => {
           if (ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify({ type: 'ping', ts: Date.now() }));
           }
@@ -308,8 +304,11 @@ export default function Viewer() {
 
       ws.onclose = () => {
         setWsConnected(false);
-        if (heartbeatIntervalRef.current) {
-          clearInterval(heartbeatIntervalRef.current);
+
+        // stop heartbeat
+        if (heartbeatIntervalRef.current != null) {
+          window.clearInterval(heartbeatIntervalRef.current);
+          heartbeatIntervalRef.current = null;
         }
 
         // Auto-reconnect
@@ -322,10 +321,18 @@ export default function Viewer() {
 
           toast({
             title: 'Reconnecting...',
-            description: `Attempting to reconnect in ${delay / 1000}s`
+            description: `Attempting to reconnect in ${Math.floor(
+              delay / 1000
+            )}s`
           });
 
-          reconnectTimeoutRef.current = setTimeout(connect, delay);
+          // 🔻 clear any pending reconnect timer before scheduling a new one
+          if (reconnectTimeoutRef.current !== null) {
+            window.clearTimeout(reconnectTimeoutRef.current);
+            reconnectTimeoutRef.current = null;
+          }
+
+          reconnectTimeoutRef.current = window.setTimeout(connect, delay);
         }
       };
 
@@ -471,21 +478,23 @@ export default function Viewer() {
       }
 
       // Clear timers
-      if (heartbeatIntervalRef.current) {
-        clearInterval(heartbeatIntervalRef.current);
+      if (heartbeatIntervalRef.current != null) {
+        window.clearInterval(heartbeatIntervalRef.current);
+        heartbeatIntervalRef.current = null;
       }
-      if (reconnectTimeoutRef.current) {
-        clearTimeout(reconnectTimeoutRef.current);
+      if (reconnectTimeoutRef.current != null) {
+        window.clearTimeout(reconnectTimeoutRef.current);
+        reconnectTimeoutRef.current = null;
       }
 
       // Stop quality monitoring if active
-      if (stopMonitoringRef.current) {
+      if (stopMonitoringRef.current != null) {
         stopMonitoringRef.current();
         stopMonitoringRef.current = null;
       }
 
       // Clean up host peer connection
-      if (hostPcRef.current) {
+      if (hostPcRef.current != null) {
         hostPcRef.current.close();
         hostPcRef.current = null;
       }
@@ -516,7 +525,7 @@ export default function Viewer() {
         localVideoRef.current.srcObject = null;
       }
       // Clean up recovery timeouts
-      recoveryTimeouts.current.forEach(timeout => clearTimeout(timeout));
+      recoveryTimeouts.current.forEach(timeout => window.clearTimeout(timeout));
       recoveryTimeouts.current.clear();
       recoveryAttempts.current.clear();
     };
@@ -600,8 +609,9 @@ export default function Viewer() {
 
     // Clear any pending recovery timeout
     const existingTimeout = recoveryTimeouts.current.get(connectionId);
-    if (existingTimeout) {
-      clearTimeout(existingTimeout);
+    if (existingTimeout != null) {
+      window.clearTimeout(existingTimeout);
+      recoveryTimeouts.current.delete(connectionId);
     }
 
     // Max 3 attempts
@@ -635,7 +645,7 @@ export default function Viewer() {
       }/3 for ${connectionId} in ${delay}ms`
     );
 
-    const timeout = setTimeout(async () => {
+    const timeout = window.setTimeout(async () => {
       console.log(
         `🔄 Attempting recovery ${attempts + 1}/3 for ${connectionId}`
       );
@@ -660,8 +670,8 @@ export default function Viewer() {
    */
   function clearRecoveryState(connectionId: string) {
     const existingTimeout = recoveryTimeouts.current.get(connectionId);
-    if (existingTimeout) {
-      clearTimeout(existingTimeout);
+    if (existingTimeout != null) {
+      window.clearTimeout(existingTimeout);
     }
     recoveryAttempts.current.delete(connectionId);
     recoveryTimeouts.current.delete(connectionId);
