@@ -293,6 +293,31 @@ export default function Viewer() {
           })
         );
 
+        // 👇 Immediately and explicitly ask the host for an offer
+        ws.send(
+          JSON.stringify({
+            type: 'request_offer',
+            streamId,
+            toUserId: 'host',
+            fromUserId: userId
+          })
+        );
+
+        // simple 2s watchdog to retry once if no offer yet
+        setTimeout(() => {
+          if (!hostPcRef.current) {
+            console.log('[VIEWER] No offer yet, re-requesting...');
+            wsRef.current?.send(
+              JSON.stringify({
+                type: 'request_offer',
+                streamId,
+                toUserId: 'host',
+                fromUserId: userId
+              })
+            );
+          }
+        }, 2000);
+
         // Start heartbeat
         if (heartbeatIntervalRef.current != null) {
           window.clearInterval(heartbeatIntervalRef.current);

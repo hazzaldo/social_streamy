@@ -185,7 +185,7 @@ export default function Host() {
         const msg = JSON.parse(event.data);
 
         if (msg.type === 'participant_count_update') {
-          setViewerCount(msg.count - 1); // Exclude host
+          setViewerCount(Math.max(0, (msg.count ?? 0) - 1)); // Exclude host, clamp at 0
         } else if (
           (msg.type === 'joined_stream' ||
             msg.type === 'viewer_joined' ||
@@ -208,7 +208,11 @@ export default function Host() {
           }
         } else if (msg.type === 'webrtc_answer' && msg.fromUserId) {
           const pc = viewerPcs.current.get(msg.fromUserId);
-          if (pc && msg.sdp) {
+          if (!pc) {
+            console.warn('[HOST] answer for unknown viewer', msg.fromUserId);
+            return;
+          }
+          if (msg.sdp) {
             console.log('[HOST] Received webrtc_answer from', msg.fromUserId);
             await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp));
 
@@ -340,6 +344,24 @@ export default function Host() {
             data: msg.full ? msg.patch : { ...prev.data, ...msg.patch },
             gameId: prev.gameId
           }));
+        } else if (msg.type === 'request_offer' && msg.fromUserId) {
+          const viewerId = msg.fromUserId;
+          console.log('[HOST] request_offer from', viewerId);
+
+          // if we already built a PC for this viewer, ignore
+          if (viewerPcs.current.has(viewerId)) {
+            console.log(
+              '[HOST] PC already exists for',
+              viewerId,
+              '— ignoring request_offer'
+            );
+          } else if (isLive && localStreamRef.current) {
+            await createViewerConnection(viewerId); // send webrtc_offer → viewer
+          } else {
+            // host isn’t live yet — queue and flush in goLive()
+            pendingViewersRef.current.add(viewerId);
+            console.log('[HOST] queued viewer until Go Live:', viewerId);
+          }
         }
       };
     }
@@ -519,6 +541,32 @@ export default function Host() {
     }
   }
 
+  function cleanupViewer(viewerId: string) {
+    const pc = viewerPcs.current.get(viewerId);
+    try {
+      pc?.getSenders().forEach(s => s.track && s.track.stop());
+      pc?.close();
+    } catch {}
+
+    // the cleanups you listed
+    candidateHandlerCleanups.current.get(viewerId)?.();
+    candidateHandlerCleanups.current.delete(viewerId);
+
+    monitoringCleanups.current.get(viewerId)?.();
+    monitoringCleanups.current.delete(viewerId);
+
+    qualityManagers.current.delete(viewerId);
+    viewerPcs.current.delete(viewerId);
+
+    // also tidy any retry timers for this viewer
+    const key = `viewer-${viewerId}`;
+    const t = recoveryTimeouts.current.get(key);
+    if (t) clearTimeout(t);
+    recoveryTimeouts.current.delete(key);
+    recoveryAttempts.current.delete(key);
+    haveLoggedFirstIce.current.delete(viewerId);
+  }
+
   async function createViewerConnection(viewerUserId: string) {
     const pc = new RTCPeerConnection(ICE_CONFIG);
     viewerPcs.current.set(viewerUserId, pc);
@@ -612,6 +660,7 @@ export default function Host() {
               type: 'ice_candidate',
               streamId,
               toUserId: viewerUserId,
+              fromUserId: 'host', // ← add this
               candidate: candidate
             })
           );
@@ -798,6 +847,7 @@ export default function Host() {
             type: 'ice_candidate',
             streamId,
             toUserId: guestUserId,
+            fromUserId: 'host', // ← add this
             candidate: event.candidate
           })
         );
@@ -988,6 +1038,7 @@ export default function Host() {
   }
 
   function stopLive() {
+    haveLoggedFirstIce.current.clear();
     // Stop local media tracks
     localStreamRef.current?.getTracks().forEach(track => track.stop());
     setLocalStream(null);
@@ -995,33 +1046,44 @@ export default function Host() {
     setIsLive(false);
     setWsConnected(false);
 
-    // Clean up viewer connections (stop senders before closing)
-    viewerPcs.current.forEach(pc => {
-      // Stop all sender tracks to ensure clean teardown
-      pc.getSenders().forEach(sender => {
-        if (sender.track) {
-          sender.track.stop();
-        }
-      });
-      pc.close();
-    });
-    viewerPcs.current.clear();
+    // NEW: close WS and clear heartbeat so it doesn’t keep pinging
+    if (heartbeatIntervalRef.current) {
+      clearInterval(heartbeatIntervalRef.current);
+      heartbeatIntervalRef.current = null;
+    }
+    if (wsRef.current) {
+      try {
+        wsRef.current.close();
+      } catch {}
+      wsRef.current = null;
+    }
 
-    // Clean up quality managers
-    qualityManagers.current.clear();
+    // Cancel any scheduled reconnect attempt
+    if (reconnectTimeoutRef.current) {
+      clearTimeout(reconnectTimeoutRef.current);
+      reconnectTimeoutRef.current = null;
+    }
 
-    // Clean up monitoring
-    monitoringCleanups.current.forEach(cleanup => cleanup());
-    monitoringCleanups.current.clear();
+    setIsReconnecting(false);
 
-    // Clean up candidate handlers
-    candidateHandlerCleanups.current.forEach(cleanup => cleanup());
-    candidateHandlerCleanups.current.clear();
+    // Clean up all viewer peer connections and their resources
+    for (const viewerId of Array.from(viewerPcs.current.keys())) {
+      cleanupViewer(viewerId);
+    }
+
+    // Drop any queued pre-join viewers + platform map
+    pendingViewersRef.current.clear();
+    viewerPlatforms.current.clear();
 
     // Clean up recovery timeouts
     recoveryTimeouts.current.forEach(timeout => clearTimeout(timeout));
     recoveryTimeouts.current.clear();
     recoveryAttempts.current.clear();
+
+    // Clean up guest monitoring/quality manager if set
+    monitoringCleanups.current.get('guest')?.();
+    monitoringCleanups.current.delete('guest');
+    qualityManagers.current.delete('guest');
 
     // Clean up guest connection and streams
     if (guestPcRef.current) {
@@ -1042,6 +1104,7 @@ export default function Host() {
     setActiveGuestId(null);
     setGuestMuted(false);
     setGuestCamOff(false);
+    setCohostQueue([]);
 
     // Clear video element refs
     if (localVideoRef.current) {
@@ -1050,6 +1113,8 @@ export default function Host() {
     if (guestVideoRef.current) {
       guestVideoRef.current.srcObject = null;
     }
+
+    setViewerCount(0);
   }
 
   function copyInviteLink() {
