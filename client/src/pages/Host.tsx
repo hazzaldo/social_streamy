@@ -653,7 +653,7 @@ export default function Host() {
               type: 'ice_candidate',
               streamId,
               toUserId: viewerUserId,
-              fromUserId: 'host', // ← add this
+              fromUserId: userId, // ← add this
               candidate: candidate
             })
           );
@@ -842,7 +842,7 @@ export default function Host() {
             type: 'ice_candidate',
             streamId,
             toUserId: guestUserId,
-            fromUserId: 'host', // ← add this
+            fromUserId: userId, // ← add this
             candidate: event.candidate
           })
         );

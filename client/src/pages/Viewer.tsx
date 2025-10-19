@@ -294,15 +294,6 @@ export default function Viewer() {
           })
         );
 
-        ws.send(
-          JSON.stringify({
-            type: 'request_offer',
-            streamId,
-            toUserId: hostIdRef.current ?? 'host',
-            fromUserId: userId
-          })
-        );
-
         // Start heartbeat
         if (heartbeatIntervalRef.current != null) {
           window.clearInterval(heartbeatIntervalRef.current);
@@ -769,11 +760,12 @@ export default function Viewer() {
     // 3) ICE out
     pc.onicecandidate = event => {
       if (event.candidate && wsRef.current?.readyState === WebSocket.OPEN) {
+        const destHostId = metadata?.hostUserId ?? hostIdRef.current ?? 'host';
         wsRef.current.send(
           JSON.stringify({
             type: 'ice_candidate',
             streamId,
-            toUserId: hostIdRef.current, // ✅ use the real host id
+            toUserId: destHostId,
             fromUserId: userId,
             candidate: event.candidate
           })
@@ -802,11 +794,12 @@ export default function Viewer() {
     }
     await pc.setLocalDescription(answer);
 
+    const destHostId = metadata?.hostUserId ?? hostIdRef.current ?? 'host';
     wsRef.current?.send(
       JSON.stringify({
         type: 'webrtc_answer',
         streamId,
-        toUserId: hostIdRef.current, // ✅ send back to the *actual* host id
+        toUserId: destHostId,
         fromUserId: userId,
         sdp: answer
       })
