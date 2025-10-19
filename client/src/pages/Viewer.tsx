@@ -260,9 +260,23 @@ export default function Viewer() {
       const ws = new WebSocket(wsUrl('/ws'));
       wsRef.current = ws;
 
+      /*************  ✨ Windsurf Command ⭐  *************/
+      /**
+       * WebSocket onopen event handler.
+       * Called when the WebSocket connection is established.
+       * Reconnects the WebSocket connection when the connection is closed.
+       * Resets reconnect attempts counter.
+      /*******  77c63eae-9855-4fb6-a251-e6ba2b01a220  *******/
       ws.onopen = () => {
         setWsConnected(true);
+        setIsReconnecting(false); // optional: drop banner immediately
         reconnectAttemptsRef.current = 0;
+
+        // if a reconnect timeout was pending, kill it
+        if (reconnectTimeoutRef.current != null) {
+          window.clearTimeout(reconnectTimeoutRef.current);
+          reconnectTimeoutRef.current = null;
+        }
 
         // Detect iOS/Safari for codec preference
         const isIOSSafari =
@@ -300,6 +314,15 @@ export default function Viewer() {
             })
           );
         }
+      };
+
+      ws.onerror = e => {
+        console.warn('[WS] error', e);
+        // optional UX
+        toast({
+          title: 'Connection error',
+          description: 'Trying to recover…'
+        });
       };
 
       ws.onclose = () => {
@@ -420,8 +443,16 @@ export default function Viewer() {
           }
 
           if (localVideoRef.current) {
-            localVideoRef.current.srcObject = null;
+            localVideoRef.current.srcObject = null; // ✅ starting co-host
           }
+
+          // ✅ Add this to feed PiP with your local camera (video-only to avoid echo) - this is only if you want the Viewer to see themselves in a small window in the Host session, which in our case we don't. The Viewer is only meant to watch the host.
+          // if (guestVideoRef.current) {
+          //   const videoOnly = new MediaStream(stream.getVideoTracks());
+          //   guestVideoRef.current.srcObject = videoOnly;
+          //   guestVideoRef.current.muted = true;
+          //   guestVideoRef.current.play?.().catch(() => {});
+          // }
 
           toast({
             title: 'Co-host Ended',
@@ -529,7 +560,7 @@ export default function Viewer() {
       recoveryTimeouts.current.clear();
       recoveryAttempts.current.clear();
     };
-  }, [isJoined, streamId, userId]);
+  }, [isJoined, streamId]);
 
   // Network change handling - trigger recovery on network events
   useEffect(() => {
