@@ -1,13 +1,16 @@
-import express, { type Request, Response, NextFunction } from "express";
-import { registerRoutes } from "./routes";
-import { setupVite, serveStatic, log } from "./vite";
-import { corsMiddleware, securityHeadersMiddleware } from "./security";
+import express, { type Request, Response, NextFunction } from 'express';
+import { registerRoutes } from './routes';
+import { setupVite, serveStatic, log } from './vite';
+import { corsMiddleware, securityHeadersMiddleware } from './security';
 
 const app = express();
 
-// Phase 1: Security middleware (global)
-app.use(corsMiddleware);
+// Phase 1: Security // Phase 1: Security middleware (global)
 app.use(securityHeadersMiddleware);
+
+// Only apply CORS to programmatic endpoints (not HTML routes)
+app.use('/api', corsMiddleware);
+// (omit /ws unless you have HTTP routes there)
 
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
@@ -23,16 +26,16 @@ app.use((req, res, next) => {
     return originalResJson.apply(res, [bodyJson, ...args]);
   };
 
-  res.on("finish", () => {
+  res.on('finish', () => {
     const duration = Date.now() - start;
-    if (path.startsWith("/api")) {
+    if (path.startsWith('/api')) {
       let logLine = `${req.method} ${path} ${res.statusCode} in ${duration}ms`;
       if (capturedJsonResponse) {
         logLine += ` :: ${JSON.stringify(capturedJsonResponse)}`;
       }
 
       if (logLine.length > 80) {
-        logLine = logLine.slice(0, 79) + "…";
+        logLine = logLine.slice(0, 79) + '…';
       }
 
       log(logLine);
@@ -47,45 +50,39 @@ app.use((req, res, next) => {
 
   app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
     const status = err.status || err.statusCode || 500;
-    const message = err.message || "Internal Server Error";
-
+    const message = err.message || 'Internal Server Error';
     res.status(status).json({ message });
     throw err;
   });
 
-  // Add cache-busting middleware for debugging (prevents CDN/browser cache issues)
   app.use((req, res, next) => {
-    // Disable caching for HTML, JS, and CSS during debug phase
-    if (req.path.match(/\.(html|js|css|mjs)$/i) || req.path === '/' || req.path.startsWith('/host') || req.path.startsWith('/viewer')) {
-      res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+    if (
+      req.path.match(/\.(html|js|css|mjs)$/i) ||
+      req.path === '/' ||
+      req.path.startsWith('/host') ||
+      req.path.startsWith('/viewer')
+    ) {
+      res.setHeader(
+        'Cache-Control',
+        'no-store, no-cache, must-revalidate, proxy-revalidate'
+      );
       res.setHeader('Pragma', 'no-cache');
       res.setHeader('Expires', '0');
     }
     next();
   });
 
-  // importantly only setup vite in development and after
-  // setting up all the other routes so the catch-all route
-  // doesn't interfere with the other routes
-  if (app.get("env") === "development") {
+  if (app.get('env') === 'development') {
     await setupVite(app, server);
   } else {
     serveStatic(app);
   }
 
-  // ALWAYS serve the app on the port specified in the environment variable PORT
-  // Other ports are firewalled. Default to 5000 if not specified.
-  // this serves both the API and the client.
-  // It is the only port that is not firewalled.
   const port = parseInt(process.env.PORT || '5000', 10);
-  server.listen({
-    port,
-    host: "0.0.0.0",
-    reusePort: true,
-  }, () => {
+  server.listen({ port, host: 'localhost' }, () => {
     const buildTag = 'WAVE3-H264-MVP';
     const timestamp = new Date().toISOString();
     console.log(`[BUILD] ${timestamp} ${buildTag}`);
-    log(`serving on port ${port}`);
+    log(`serving on http://localhost:${port}`);
   });
-})();
+})(); // 👈 this actually runs the async function
