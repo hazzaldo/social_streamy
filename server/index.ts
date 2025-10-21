@@ -72,17 +72,18 @@ app.use((req, res, next) => {
     next();
   });
 
-  if (app.get('env') === 'development') {
-    await setupVite(app, server);
-  } else {
-    serveStatic(app);
+  // We run Vite separately (CLI) in dev, so no middleware here.
+  if (app.get('env') !== 'development') {
+    serveStatic(app); // only in production do we serve built assets
   }
 
-  const port = parseInt(process.env.PORT || '5000', 10);
-  server.listen({ port, host: 'localhost' }, () => {
+  // near the bottom of server/index.ts
+  const port = parseInt(process.env.PORT || '5050', 10);
+  // bind without forcing host so Node can choose IPv4/IPv6 as available
+  server.listen(port, () => {
     const buildTag = 'WAVE3-H264-MVP';
     const timestamp = new Date().toISOString();
     console.log(`[BUILD] ${timestamp} ${buildTag}`);
     log(`serving on http://localhost:${port}`);
   });
-})(); // 👈 this actually runs the async function
+})();

@@ -811,8 +811,6 @@ export default function Viewer() {
       const video = hostVideoRef.current;
       video.muted = isMuted;
       video.playsInline = true;
-      video.srcObject = stream;
-      video.play().catch(() => setAutoplayBlocked(true));
 
       video.srcObject = stream;
       video
