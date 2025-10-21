@@ -1,7 +1,7 @@
-import type { Express } from "express";
-import { createServer, type Server } from "http";
-import { WebSocketServer, WebSocket } from "ws";
-import { storage } from "./storage";
+import type { Express } from 'express';
+import { createServer, type Server } from 'http';
+import { WebSocketServer, WebSocket } from 'ws';
+import { storage } from './storage';
 import {
   MessageDeduplicator,
   TokenBucketRateLimiter,
@@ -10,17 +10,24 @@ import {
   MessageCoalescer,
   BackpressureMonitor,
   PayloadValidator
-} from "./signaling-utils";
-import { GracefulShutdown } from "./graceful-shutdown";
-import { validateWebSocketOrigin } from "./security";
-import { MessageRouter } from "./message-router";
+} from './signaling-utils';
+import { GracefulShutdown } from './graceful-shutdown';
+import { validateWebSocketOrigin } from './security';
+import { MessageRouter } from './message-router';
 import {
   handleJoinStream,
   handleResume,
   handleWebRTCOffer,
   handleWebRTCAnswer,
   handleICECandidate
-} from "./wave1-handlers";
+} from './wave1-handlers';
+
+import { handleRequestOffer } from './wave1-handlers';
+
+export const routes = {
+  // …existing routes
+  request_offer: handleRequestOffer
+};
 
 // In-memory room and participant tracking
 interface Participant {
@@ -99,7 +106,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
     res.json({
       rooms: Array.from(rooms.entries()).map(([id, roomState]) => ({
         id,
-        viewersCount: Array.from(roomState.participants.values()).filter(p => p.role === 'viewer').length,
+        viewersCount: Array.from(roomState.participants.values()).filter(
+          p => p.role === 'viewer'
+        ).length,
         h264Only: true
       }))
     });
@@ -117,45 +126,56 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.get('/readyz', (_req, res) => {
     const checks: { [key: string]: boolean } = {};
     const issues: string[] = [];
-    
+
     // Check 1: Router enabled
     checks.routerEnabled = ROUTER_ENABLED;
     if (!ROUTER_ENABLED) {
       issues.push('Router is disabled');
     }
-    
+
     // Check 2: TURN credentials configured
     const hasTurnUrl = !!process.env.TURN_URL || !!process.env.TURNS_URL;
-    const hasTurnCreds = !!process.env.TURN_USERNAME && !!process.env.TURN_CREDENTIAL;
+    const hasTurnCreds =
+      !!process.env.TURN_USERNAME && !!process.env.TURN_CREDENTIAL;
     checks.turnConfigured = hasTurnUrl && hasTurnCreds;
     if (!checks.turnConfigured) {
       if (!hasTurnUrl) issues.push('TURN_URL or TURNS_URL not configured');
       if (!hasTurnCreds) issues.push('TURN credentials not configured');
     }
-    
+
     // Check 3: Error rate check (last 1 minute)
     // Get invalid_request and payload_too_large error counts
     const errorMetrics = metrics.getPrometheusFormat();
-    const invalidRequestMatch = errorMetrics.match(/errors_total\{code="invalid_request"\}\s+(\d+)/);
-    const payloadTooLargeMatch = errorMetrics.match(/errors_total\{code="payload_too_large"\}\s+(\d+)/);
-    
-    const invalidRequestCount = invalidRequestMatch ? parseInt(invalidRequestMatch[1]) : 0;
-    const payloadTooLargeCount = payloadTooLargeMatch ? parseInt(payloadTooLargeMatch[1]) : 0;
-    
+    const invalidRequestMatch = errorMetrics.match(
+      /errors_total\{code="invalid_request"\}\s+(\d+)/
+    );
+    const payloadTooLargeMatch = errorMetrics.match(
+      /errors_total\{code="payload_too_large"\}\s+(\d+)/
+    );
+
+    const invalidRequestCount = invalidRequestMatch
+      ? parseInt(invalidRequestMatch[1])
+      : 0;
+    const payloadTooLargeCount = payloadTooLargeMatch
+      ? parseInt(payloadTooLargeMatch[1])
+      : 0;
+
     // Simple check: total errors should be below threshold
     const errorThreshold = 5; // errors per minute threshold
     const totalErrors = invalidRequestCount + payloadTooLargeCount;
     checks.errorRateOk = totalErrors < errorThreshold;
     if (!checks.errorRateOk) {
-      issues.push(`Error rate too high: ${totalErrors} errors (threshold: ${errorThreshold})`);
+      issues.push(
+        `Error rate too high: ${totalErrors} errors (threshold: ${errorThreshold})`
+      );
     }
-    
+
     // Check 4: WebSocket server is operational (has at least processed some connections)
     // We consider it operational if router is handling messages or we have active rooms
     checks.wsOperational = true; // WebSocket server is up if we're responding to this request
-    
+
     const allChecksPass = Object.values(checks).every(v => v);
-    
+
     if (allChecksPass) {
       res.status(200).json({
         ready: true,
@@ -175,14 +195,24 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Prometheus metrics endpoint
   app.get('/metrics', (_req, res) => {
     // Update gauges before generating metrics
-    metrics.setGauge('connected_sockets', Array.from(rooms.values()).reduce((sum, r) => sum + r.participants.size, 0));
+    metrics.setGauge(
+      'connected_sockets',
+      Array.from(rooms.values()).reduce(
+        (sum, r) => sum + r.participants.size,
+        0
+      )
+    );
     metrics.setGauge('rooms_total', rooms.size);
-    
-    const avgRoomSize = rooms.size > 0 
-      ? Array.from(rooms.values()).reduce((sum, r) => sum + r.participants.size, 0) / rooms.size 
-      : 0;
+
+    const avgRoomSize =
+      rooms.size > 0
+        ? Array.from(rooms.values()).reduce(
+            (sum, r) => sum + r.participants.size,
+            0
+          ) / rooms.size
+        : 0;
     metrics.setGauge('avg_room_size', avgRoomSize);
-    
+
     res.set('Content-Type', 'text/plain; version=0.0.4');
     res.send(metrics.getPrometheusFormat());
   });
@@ -198,7 +228,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
     } else {
       res.json({
         ok: false,
-        message: 'No validation report available. Run validation from the Test Harness UI.'
+        message:
+          'No validation report available. Run validation from the Test Harness UI.'
       });
     }
   });
@@ -221,15 +252,18 @@ export async function registerRoutes(app: Express): Promise<Server> {
   const httpServer = createServer(app);
 
   // WebSocket server on /ws path
-  const wss = new WebSocketServer({ 
-    server: httpServer, 
+  const wss = new WebSocketServer({
+    server: httpServer,
     path: '/ws',
     // Phase 1: WebSocket origin validation
     verifyClient: (info: { origin: string; req: any }) => {
       const origin = info.origin || info.req.headers.origin;
       const isValid = validateWebSocketOrigin(origin);
       if (!isValid) {
-        console.warn('🚫 WebSocket connection rejected - invalid origin:', origin);
+        console.warn(
+          '🚫 WebSocket connection rejected - invalid origin:',
+          origin
+        );
         metrics.increment('ws_rejected_origin');
       }
       return isValid;
@@ -247,7 +281,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     console.log('🔌 New WebSocket connection:', socketId);
     metrics.increment('ws_connections_total');
 
-    ws.on('message', async (raw) => {
+    ws.on('message', async raw => {
       const msgStart = Date.now();
       let msg: any;
       try {
@@ -262,11 +296,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const validation = payloadValidator.validate(msg);
       if (!validation.valid) {
         console.error('❌ Invalid payload:', validation.error, msg.type);
-        ws.send(JSON.stringify({
-          type: 'error',
-          code: validation.error,
-          message: 'Invalid message payload'
-        }));
+        ws.send(
+          JSON.stringify({
+            type: 'error',
+            code: validation.error,
+            message: 'Invalid message payload'
+          })
+        );
         metrics.increment('msgs_invalid');
         return;
       }
@@ -291,16 +327,23 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       // Helper functions for both router and legacy paths
       // Helper function to send message with backpressure check and ack
-      const sendMessage = (targetWs: WebSocket, message: any, critical: boolean = true) => {
+      const sendMessage = (
+        targetWs: WebSocket,
+        message: any,
+        critical: boolean = true
+      ) => {
         if (targetWs.readyState !== WebSocket.OPEN) return false;
-        
+
         // Check backpressure
         if (backpressureMonitor.shouldDrop(targetWs, message.type)) {
-          console.warn('⚠️ Dropping non-critical message due to backpressure:', message.type);
+          console.warn(
+            '⚠️ Dropping non-critical message due to backpressure:',
+            message.type
+          );
           metrics.increment(`msgs_dropped_${message.type}`);
           return false;
         }
-        
+
         targetWs.send(JSON.stringify(message));
         metrics.increment('msgs_out_total');
         metrics.increment(`msgs_out_${message.type}`);
@@ -310,21 +353,29 @@ export async function registerRoutes(app: Express): Promise<Server> {
       // Send acknowledgment for critical messages
       const sendAck = (msgId: string) => {
         if (msgId) {
-          sendMessage(ws, {
-            type: 'ack',
-            for: msgId,
-            ts: Date.now()
-          }, true);
+          sendMessage(
+            ws,
+            {
+              type: 'ack',
+              for: msgId,
+              ts: Date.now()
+            },
+            true
+          );
         }
       };
 
       // Send normalized error response
       const sendError = (code: string, message: string) => {
-        sendMessage(ws, {
-          type: 'error',
-          code,
-          message
-        }, true);
+        sendMessage(
+          ws,
+          {
+            type: 'error',
+            code,
+            message
+          },
+          true
+        );
       };
 
       // Helper functions for routing (used by both router and legacy)
@@ -369,12 +420,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
             coalescer,
             relayToUser,
             broadcastToRoom,
-            sendAck: (msgId: string, type: string) => router.sendAck(ws, msgId, type),
-            sendError: (code: string, message: string, ref?: string) => router.sendError(ws, code, message, ref)
+            sendAck: (msgId: string, type: string) =>
+              router.sendAck(ws, msgId, type),
+            sendError: (code: string, message: string, ref?: string) =>
+              router.sendError(ws, code, message, ref)
           };
-          
+
           handled = await router.route(ws, msg, socketId, routerContext);
-          
+
           // Update closure variables if handlers modified them
           if (participantRef.current !== currentParticipant) {
             currentParticipant = participantRef.current;
@@ -382,9 +435,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
           if (sessionTokenRef.current !== sessionToken) {
             sessionToken = sessionTokenRef.current;
           }
-          
+
           if (handled) {
-            metrics.increment('msgs_handled_total', { handled_by: 'router', type: msg.type });
+            metrics.increment('msgs_handled_total', {
+              handled_by: 'router',
+              type: msg.type
+            });
             return; // Router handled it, skip legacy
           }
         } catch (error) {
@@ -395,7 +451,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       // If router didn't handle or disabled, use legacy switch
       if (!handled) {
-        metrics.increment('msgs_handled_total', { handled_by: 'legacy', type: msg.type });
+        metrics.increment('msgs_handled_total', {
+          handled_by: 'legacy',
+          type: msg.type
+        });
       }
 
       switch (msg.type) {
@@ -405,6 +464,24 @@ export async function registerRoutes(app: Express): Promise<Server> {
             type: 'pong',
             ts: Date.now()
           });
+          break;
+        }
+
+        case 'request_offer': {
+          // Build the context object expected by MessageHandler/MessageContext
+          // Reuse variables already defined in this file’s scope.
+          await handleRequestOffer(ws, msg, {
+            rooms,
+            currentParticipant,
+            relayToUser,
+            sendAck,
+            sendError,
+            metrics,
+            // add the remaining MessageContext fields your project type expects:
+            socketId, // if you already have this in scope, pass it
+            debugSdp: DEBUG_SDP // if you have a flag in scope, pass it (else: false)
+            // If your MessageContext includes more fields, include them here.
+          } as any); // <- if TS still complains, keep this cast to satisfy the type
           break;
         }
 
@@ -445,13 +522,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
           }
 
           const roomState = rooms.get(streamId)!;
-          
+
           // Restore participant
           currentParticipant = { ws, userId, streamId, role: role as any };
           roomState.participants.set(userId, currentParticipant);
 
           console.log('🔄 Session resumed:', { userId, streamId, role });
-          
+
           // Send resume confirmation with current game state
           sendMessage(ws, {
             type: 'resume_ok',
@@ -479,17 +556,19 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
         case 'echo': {
           // Echo test for debugging
-          ws.send(JSON.stringify({
-            type: 'connection_echo_test',
-            original: msg,
-            timestamp: Date.now()
-          }));
+          ws.send(
+            JSON.stringify({
+              type: 'connection_echo_test',
+              original: msg,
+              timestamp: Date.now()
+            })
+          );
           break;
         }
 
         case 'join_stream': {
           const { streamId, userId } = msg;
-          
+
           // Validation: Required fields
           if (!streamId || !userId) {
             console.error('❌ join_stream missing streamId or userId');
@@ -505,7 +584,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
           // Validation: Length limits
           if (streamId.length > 100 || userId.length > 100) {
-            sendError('invalid_request', 'streamId and userId must be <= 100 characters');
+            sendError(
+              'invalid_request',
+              'streamId and userId must be <= 100 characters'
+            );
             return;
           }
 
@@ -529,7 +611,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
           // Safety: Room capacity limit (max 100 participants)
           if (room.size >= 100 && !room.has(String(userId))) {
             console.warn('⚠️ Room at capacity:', { streamId, size: room.size });
-            sendError('room_full', 'This room has reached maximum capacity (100 participants)');
+            sendError(
+              'room_full',
+              'This room has reached maximum capacity (100 participants)'
+            );
             return;
           }
 
@@ -541,11 +626,15 @@ export async function registerRoutes(app: Express): Promise<Server> {
           room.set(String(userId), currentParticipant);
 
           // Create session token for reconnection
-          sessionToken = sessionManager.createSession(String(userId), streamId, role);
+          sessionToken = sessionManager.createSession(
+            String(userId),
+            streamId,
+            role
+          );
 
-          console.log(`✅ ${role.toUpperCase()} joined stream:`, { 
-            streamId, 
-            userId, 
+          console.log(`✅ ${role.toUpperCase()} joined stream:`, {
+            streamId,
+            userId,
             roomSize: room.size,
             totalRooms: rooms.size,
             sessionToken
@@ -590,10 +679,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
               gameId: roomState.gameState.gameId,
               seed: roomState.gameState.seed
             });
-            console.log('🎮 Sent game state to new participant:', { 
-              userId, 
+            console.log('🎮 Sent game state to new participant:', {
+              userId,
               gameId: roomState.gameState.gameId,
-              version: roomState.gameState.version 
+              version: roomState.gameState.version
             });
           }
 
@@ -604,12 +693,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
         case 'leave_stream': {
           const { streamId, userId } = msg;
           if (!streamId || !userId) return;
-          
+
           const roomState = rooms.get(streamId);
           const participant = roomState?.participants.get(String(userId));
           const role = participant?.role || 'unknown';
-          console.log('👋 leave_stream:', { 
-            streamId, 
+          console.log('👋 leave_stream:', {
+            streamId,
             userId,
             role,
             roomSize: roomState?.participants.size || 0,
@@ -622,41 +711,62 @@ export async function registerRoutes(app: Express): Promise<Server> {
             const role = participant?.role;
 
             // Remove from cohost queue if present
-            const queueIndex = roomState.cohostQueue.findIndex(r => r.userId === String(userId));
+            const queueIndex = roomState.cohostQueue.findIndex(
+              r => r.userId === String(userId)
+            );
             if (queueIndex !== -1) {
               roomState.cohostQueue.splice(queueIndex, 1);
               console.log('🚫 Removed from cohost queue on leave:', userId);
 
               // Notify host of updated queue
-              const host = Array.from(room.values()).find(p => p.role === 'host');
+              const host = Array.from(room.values()).find(
+                p => p.role === 'host'
+              );
               if (host && host.ws.readyState === WebSocket.OPEN) {
-                host.ws.send(JSON.stringify({
-                  type: 'cohost_queue_updated',
-                  streamId,
-                  queue: roomState.cohostQueue.map(r => ({ userId: r.userId, timestamp: r.timestamp }))
-                }));
+                host.ws.send(
+                  JSON.stringify({
+                    type: 'cohost_queue_updated',
+                    streamId,
+                    queue: roomState.cohostQueue.map(r => ({
+                      userId: r.userId,
+                      timestamp: r.timestamp
+                    }))
+                  })
+                );
               }
             }
 
             // If leaving user is active guest, clear session and notify host
-            if (role === 'guest' && roomState.activeGuestId === String(userId)) {
+            if (
+              role === 'guest' &&
+              roomState.activeGuestId === String(userId)
+            ) {
               roomState.activeGuestId = null;
-              
-              const host = Array.from(room.values()).find(p => p.role === 'host');
+
+              const host = Array.from(room.values()).find(
+                p => p.role === 'host'
+              );
               if (host && host.ws.readyState === WebSocket.OPEN) {
-                host.ws.send(JSON.stringify({
-                  type: 'cohost_ended',
-                  streamId,
-                  by: 'guest',
-                  guestUserId: String(userId)
-                }));
+                host.ws.send(
+                  JSON.stringify({
+                    type: 'cohost_ended',
+                    streamId,
+                    by: 'guest',
+                    guestUserId: String(userId)
+                  })
+                );
 
                 // Always send queue update (even if empty) to clear host UI
-                host.ws.send(JSON.stringify({
-                  type: 'cohost_queue_updated',
-                  streamId,
-                  queue: roomState.cohostQueue.map(r => ({ userId: r.userId, timestamp: r.timestamp }))
-                }));
+                host.ws.send(
+                  JSON.stringify({
+                    type: 'cohost_queue_updated',
+                    streamId,
+                    queue: roomState.cohostQueue.map(r => ({
+                      userId: r.userId,
+                      timestamp: r.timestamp
+                    }))
+                  })
+                );
               }
               console.log('🔚 Active guest left stream, session ended');
             }
@@ -665,18 +775,24 @@ export async function registerRoutes(app: Express): Promise<Server> {
             if (role === 'host' && roomState.activeGuestId) {
               const guest = room.get(roomState.activeGuestId);
               if (guest && guest.ws.readyState === WebSocket.OPEN) {
-                guest.ws.send(JSON.stringify({
-                  type: 'cohost_ended',
-                  streamId,
-                  by: 'host'
-                }));
+                guest.ws.send(
+                  JSON.stringify({
+                    type: 'cohost_ended',
+                    streamId,
+                    by: 'host'
+                  })
+                );
               }
               roomState.activeGuestId = null;
               console.log('🔚 Host left stream, cohost session ended');
             }
 
             room.delete(String(userId));
-            console.log(`👋 User left stream:`, { streamId, userId, remainingCount: room.size });
+            console.log(`👋 User left stream:`, {
+              streamId,
+              userId,
+              remainingCount: room.size
+            });
 
             if (room.size === 0) {
               rooms.delete(streamId);
@@ -700,17 +816,26 @@ export async function registerRoutes(app: Express): Promise<Server> {
             return;
           }
 
-          console.log('📤 Relaying webrtc_offer', { from: fromUserId, to: toUserId, sdpLen: sdp.sdp?.length });
+          console.log('📤 Relaying webrtc_offer', {
+            from: fromUserId,
+            to: toUserId,
+            sdpLen: sdp.sdp?.length
+          });
 
           // Special handling: if toUserId is 'host', find the actual host in the room
           let actualToUserId = toUserId;
           if (toUserId === 'host' && currentParticipant) {
             const roomState = rooms.get(currentParticipant.streamId);
             if (roomState) {
-              const host = Array.from(roomState.participants.values()).find(p => p.role === 'host');
+              const host = Array.from(roomState.participants.values()).find(
+                p => p.role === 'host'
+              );
               if (host) {
                 actualToUserId = host.userId;
-                console.log('✅ Resolved "host" to actual userId:', actualToUserId);
+                console.log(
+                  '✅ Resolved "host" to actual userId:',
+                  actualToUserId
+                );
               }
             }
           }
@@ -731,7 +856,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
             return;
           }
 
-          console.log('📤 Relaying webrtc_answer', { from: fromUserId, to: toUserId, sdpLen: sdp.sdp?.length });
+          console.log('📤 Relaying webrtc_answer', {
+            from: fromUserId,
+            to: toUserId,
+            sdpLen: sdp.sdp?.length
+          });
 
           relayToUser(toUserId, {
             type: 'webrtc_answer',
@@ -758,7 +887,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
               message: 'Too many ICE candidates. Please slow down.'
             });
             metrics.increment('rate_limited_ice_candidate');
-            console.warn('⚠️ ICE candidate rate limit exceeded:', authenticatedUserId);
+            console.warn(
+              '⚠️ ICE candidate rate limit exceeded:',
+              authenticatedUserId
+            );
             return;
           }
 
@@ -767,10 +899,15 @@ export async function registerRoutes(app: Express): Promise<Server> {
           if (toUserId === 'host' && currentParticipant) {
             const roomState = rooms.get(currentParticipant.streamId);
             if (roomState) {
-              const host = Array.from(roomState.participants.values()).find(p => p.role === 'host');
+              const host = Array.from(roomState.participants.values()).find(
+                p => p.role === 'host'
+              );
               if (host) {
                 actualToUserId = host.userId;
-                console.log('✅ Resolved ICE "host" to actual userId:', actualToUserId);
+                console.log(
+                  '✅ Resolved ICE "host" to actual userId:',
+                  actualToUserId
+                );
               }
             }
           }
@@ -787,7 +924,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
                 toUserId: actualToUserId,
                 candidate
               },
-              (messages) => {
+              messages => {
                 // Flush coalesced candidates
                 for (const msg of messages) {
                   relayToUser(msg.toUserId, {
@@ -823,34 +960,53 @@ export async function registerRoutes(app: Express): Promise<Server> {
               streamId,
               reason: 'guest_active'
             });
-            console.log('🚫 Auto-declined cohost_request (guest already active):', fromUserId);
+            console.log(
+              '🚫 Auto-declined cohost_request (guest already active):',
+              fromUserId
+            );
             return;
           }
 
           // Add to queue if not already there
-          if (!roomState.cohostQueue.find(r => r.userId === String(fromUserId))) {
+          if (
+            !roomState.cohostQueue.find(r => r.userId === String(fromUserId))
+          ) {
             roomState.cohostQueue.push({
               userId: String(fromUserId),
               timestamp: Date.now()
             });
-            console.log('📥 Added to cohost queue:', fromUserId, 'queue length:', roomState.cohostQueue.length);
+            console.log(
+              '📥 Added to cohost queue:',
+              fromUserId,
+              'queue length:',
+              roomState.cohostQueue.length
+            );
           }
 
           // Find host and relay request + queue update
-          const host = Array.from(roomState.participants.values()).find(p => p.role === 'host');
+          const host = Array.from(roomState.participants.values()).find(
+            p => p.role === 'host'
+          );
           if (host && host.ws.readyState === WebSocket.OPEN) {
-            host.ws.send(JSON.stringify({
-              type: 'cohost_request',
-              fromUserId: String(fromUserId),
-              streamId
-            }));
-            
+            host.ws.send(
+              JSON.stringify({
+                type: 'cohost_request',
+                fromUserId: String(fromUserId),
+                streamId
+              })
+            );
+
             // Send updated queue to host
-            host.ws.send(JSON.stringify({
-              type: 'cohost_queue_updated',
-              streamId,
-              queue: roomState.cohostQueue.map(r => ({ userId: r.userId, timestamp: r.timestamp }))
-            }));
+            host.ws.send(
+              JSON.stringify({
+                type: 'cohost_queue_updated',
+                streamId,
+                queue: roomState.cohostQueue.map(r => ({
+                  userId: r.userId,
+                  timestamp: r.timestamp
+                }))
+              })
+            );
             console.log('✅ Relayed cohost_request to host from:', fromUserId);
           }
           break;
@@ -866,19 +1022,28 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
           const roomState = rooms.get(streamId);
           if (roomState) {
-            const queueIndex = roomState.cohostQueue.findIndex(r => r.userId === String(userId));
+            const queueIndex = roomState.cohostQueue.findIndex(
+              r => r.userId === String(userId)
+            );
             if (queueIndex !== -1) {
               roomState.cohostQueue.splice(queueIndex, 1);
               console.log('🚫 Removed from cohost queue:', userId);
 
               // Notify host of updated queue
-              const host = Array.from(roomState.participants.values()).find(p => p.role === 'host');
+              const host = Array.from(roomState.participants.values()).find(
+                p => p.role === 'host'
+              );
               if (host && host.ws.readyState === WebSocket.OPEN) {
-                host.ws.send(JSON.stringify({
-                  type: 'cohost_queue_updated',
-                  streamId,
-                  queue: roomState.cohostQueue.map(r => ({ userId: r.userId, timestamp: r.timestamp }))
-                }));
+                host.ws.send(
+                  JSON.stringify({
+                    type: 'cohost_queue_updated',
+                    streamId,
+                    queue: roomState.cohostQueue.map(r => ({
+                      userId: r.userId,
+                      timestamp: r.timestamp
+                    }))
+                  })
+                );
               }
             }
           }
@@ -897,15 +1062,23 @@ export async function registerRoutes(app: Express): Promise<Server> {
           if (!roomState) return;
 
           // Defensive guard: reject if there's already an active guest (unless it's the same user)
-          if (roomState.activeGuestId && roomState.activeGuestId !== String(guestUserId)) {
-            console.error('❌ Cannot accept cohost, guest already active:', roomState.activeGuestId);
+          if (
+            roomState.activeGuestId &&
+            roomState.activeGuestId !== String(guestUserId)
+          ) {
+            console.error(
+              '❌ Cannot accept cohost, guest already active:',
+              roomState.activeGuestId
+            );
             return;
           }
 
           const room = roomState.participants;
 
           // Remove from queue
-          const queueIndex = roomState.cohostQueue.findIndex(r => r.userId === String(guestUserId));
+          const queueIndex = roomState.cohostQueue.findIndex(
+            r => r.userId === String(guestUserId)
+          );
           if (queueIndex !== -1) {
             roomState.cohostQueue.splice(queueIndex, 1);
           }
@@ -925,21 +1098,28 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
             // Notify the guest
             if (participant.ws.readyState === WebSocket.OPEN) {
-              participant.ws.send(JSON.stringify({
-                type: 'cohost_accepted',
-                streamId
-              }));
+              participant.ws.send(
+                JSON.stringify({
+                  type: 'cohost_accepted',
+                  streamId
+                })
+              );
             }
           }
 
           // Notify host of updated queue
           const host = Array.from(room.values()).find(p => p.role === 'host');
           if (host && host.ws.readyState === WebSocket.OPEN) {
-            host.ws.send(JSON.stringify({
-              type: 'cohost_queue_updated',
-              streamId,
-              queue: roomState.cohostQueue.map(r => ({ userId: r.userId, timestamp: r.timestamp }))
-            }));
+            host.ws.send(
+              JSON.stringify({
+                type: 'cohost_queue_updated',
+                streamId,
+                queue: roomState.cohostQueue.map(r => ({
+                  userId: r.userId,
+                  timestamp: r.timestamp
+                }))
+              })
+            );
           }
           break;
         }
@@ -955,18 +1135,27 @@ export async function registerRoutes(app: Express): Promise<Server> {
           const roomState = rooms.get(streamId);
           if (roomState) {
             // Remove from queue
-            const queueIndex = roomState.cohostQueue.findIndex(r => r.userId === String(viewerUserId));
+            const queueIndex = roomState.cohostQueue.findIndex(
+              r => r.userId === String(viewerUserId)
+            );
             if (queueIndex !== -1) {
               roomState.cohostQueue.splice(queueIndex, 1);
 
               // Notify host of updated queue
-              const host = Array.from(roomState.participants.values()).find(p => p.role === 'host');
+              const host = Array.from(roomState.participants.values()).find(
+                p => p.role === 'host'
+              );
               if (host && host.ws.readyState === WebSocket.OPEN) {
-                host.ws.send(JSON.stringify({
-                  type: 'cohost_queue_updated',
-                  streamId,
-                  queue: roomState.cohostQueue.map(r => ({ userId: r.userId, timestamp: r.timestamp }))
-                }));
+                host.ws.send(
+                  JSON.stringify({
+                    type: 'cohost_queue_updated',
+                    streamId,
+                    queue: roomState.cohostQueue.map(r => ({
+                      userId: r.userId,
+                      timestamp: r.timestamp
+                    }))
+                  })
+                );
               }
             }
           }
@@ -1007,26 +1196,35 @@ export async function registerRoutes(app: Express): Promise<Server> {
           // Notify both host and guest
           const host = Array.from(room.values()).find(p => p.role === 'host');
           if (host && host.ws.readyState === WebSocket.OPEN) {
-            host.ws.send(JSON.stringify({
-              type: 'cohost_ended',
-              streamId,
-              by,
-              guestUserId
-            }));
+            host.ws.send(
+              JSON.stringify({
+                type: 'cohost_ended',
+                streamId,
+                by,
+                guestUserId
+              })
+            );
 
             // Always send queue update (even if empty) to update host UI
-            host.ws.send(JSON.stringify({
-              type: 'cohost_queue_updated',
-              streamId,
-              queue: roomState.cohostQueue.map(r => ({ userId: r.userId, timestamp: r.timestamp }))
-            }));
+            host.ws.send(
+              JSON.stringify({
+                type: 'cohost_queue_updated',
+                streamId,
+                queue: roomState.cohostQueue.map(r => ({
+                  userId: r.userId,
+                  timestamp: r.timestamp
+                }))
+              })
+            );
           }
           if (guest && guest.ws.readyState === WebSocket.OPEN) {
-            guest.ws.send(JSON.stringify({
-              type: 'cohost_ended',
-              streamId,
-              by
-            }));
+            guest.ws.send(
+              JSON.stringify({
+                type: 'cohost_ended',
+                streamId,
+                by
+              })
+            );
           }
 
           console.log('🔚 Cohost session ended by:', by);
@@ -1063,35 +1261,43 @@ export async function registerRoutes(app: Express): Promise<Server> {
           // Phase 5: Host initializes a game
           const { streamId, gameId, version, seed } = msg;
           if (!streamId || !gameId) {
-            ws.send(JSON.stringify({
-              type: 'game_error',
-              streamId,
-              code: 'INVALID_INIT',
-              message: 'Missing streamId or gameId'
-            }));
+            ws.send(
+              JSON.stringify({
+                type: 'game_error',
+                streamId,
+                code: 'INVALID_INIT',
+                message: 'Missing streamId or gameId'
+              })
+            );
             return;
           }
 
           const roomState = rooms.get(streamId);
           if (!roomState) {
-            ws.send(JSON.stringify({
-              type: 'game_error',
-              streamId,
-              code: 'ROOM_NOT_FOUND',
-              message: 'Room not found'
-            }));
+            ws.send(
+              JSON.stringify({
+                type: 'game_error',
+                streamId,
+                code: 'ROOM_NOT_FOUND',
+                message: 'Room not found'
+              })
+            );
             return;
           }
 
           // Verify sender is host
-          const participant = roomState.participants.get(currentParticipant?.userId || '');
+          const participant = roomState.participants.get(
+            currentParticipant?.userId || ''
+          );
           if (participant?.role !== 'host') {
-            ws.send(JSON.stringify({
-              type: 'game_error',
-              streamId,
-              code: 'NOT_HOST',
-              message: 'Only host can initialize games'
-            }));
+            ws.send(
+              JSON.stringify({
+                type: 'game_error',
+                streamId,
+                code: 'NOT_HOST',
+                message: 'Only host can initialize games'
+              })
+            );
             return;
           }
 
@@ -1103,7 +1309,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
             data: null
           };
 
-          console.log('🎮 Game initialized:', { streamId, gameId, version: roomState.gameState.version });
+          console.log('🎮 Game initialized:', {
+            streamId,
+            gameId,
+            version: roomState.gameState.version
+          });
 
           // Broadcast to all participants
           broadcastToRoom(streamId, {
@@ -1120,12 +1330,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
           // Phase 5: Host broadcasts game state update
           const { streamId, version, full, patch } = msg;
           if (!streamId) {
-            ws.send(JSON.stringify({
-              type: 'game_error',
-              streamId,
-              code: 'INVALID_STATE',
-              message: 'Missing streamId'
-            }));
+            ws.send(
+              JSON.stringify({
+                type: 'game_error',
+                streamId,
+                code: 'INVALID_STATE',
+                message: 'Missing streamId'
+              })
+            );
             return;
           }
 
@@ -1133,31 +1345,40 @@ export async function registerRoutes(app: Express): Promise<Server> {
           if (!roomState) return;
 
           // Verify sender is host
-          const participant = roomState.participants.get(currentParticipant?.userId || '');
+          const participant = roomState.participants.get(
+            currentParticipant?.userId || ''
+          );
           if (participant?.role !== 'host') {
-            ws.send(JSON.stringify({
-              type: 'game_error',
-              streamId,
-              code: 'NOT_HOST',
-              message: 'Only host can update game state'
-            }));
+            ws.send(
+              JSON.stringify({
+                type: 'game_error',
+                streamId,
+                code: 'NOT_HOST',
+                message: 'Only host can update game state'
+              })
+            );
             return;
           }
 
           // Update game state
           if (full) {
             roomState.gameState.data = patch;
-            roomState.gameState.version = version || (roomState.gameState.version + 1);
+            roomState.gameState.version =
+              version || roomState.gameState.version + 1;
           } else {
             // Shallow merge patch
-            roomState.gameState.data = { ...roomState.gameState.data, ...patch };
-            roomState.gameState.version = version || (roomState.gameState.version + 1);
+            roomState.gameState.data = {
+              ...roomState.gameState.data,
+              ...patch
+            };
+            roomState.gameState.version =
+              version || roomState.gameState.version + 1;
           }
 
-          console.log('🎮 Game state updated:', { 
-            streamId, 
-            version: roomState.gameState.version, 
-            full 
+          console.log('🎮 Game state updated:', {
+            streamId,
+            version: roomState.gameState.version,
+            full
           });
 
           // Coalesce game state updates to reduce broadcast overhead
@@ -1171,7 +1392,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
               full,
               patch: full ? roomState.gameState.data : patch
             },
-            (messages) => {
+            messages => {
               // Only send the latest state (last message in queue)
               if (messages.length > 0) {
                 const latestState = messages[messages.length - 1];
@@ -1215,14 +1436,23 @@ export async function registerRoutes(app: Express): Promise<Server> {
               message: 'Too many game events. Please slow down.'
             });
             metrics.increment('rate_limited_game_event');
-            console.warn('⚠️ Game event rate limit exceeded:', authenticatedUserId);
+            console.warn(
+              '⚠️ Game event rate limit exceeded:',
+              authenticatedUserId
+            );
             return;
           }
 
-          console.log('🎮 Game event received:', { streamId, eventType, from: authenticatedUserId });
+          console.log('🎮 Game event received:', {
+            streamId,
+            eventType,
+            from: authenticatedUserId
+          });
 
           // Forward to host for processing
-          const host = Array.from(roomState.participants.values()).find(p => p.role === 'host');
+          const host = Array.from(roomState.participants.values()).find(
+            p => p.role === 'host'
+          );
           if (host && host.ws.readyState === WebSocket.OPEN) {
             sendMessage(host.ws, {
               type: 'game_event',
@@ -1249,7 +1479,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
     ws.on('close', () => {
       console.log('🔌 WebSocket disconnected:', socketId);
       metrics.increment('ws_disconnections_total');
-      
+
       // Cleanup signaling utilities
       deduplicator.cleanup(socketId);
       if (sessionToken) {
@@ -1262,7 +1492,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         const gameKey = `game_${currentParticipant.userId}`;
         gameEventRateLimiter.cleanup(gameKey);
       }
-      
+
       // Clean up participant
       if (currentParticipant) {
         const { streamId, userId, role } = currentParticipant;
@@ -1271,7 +1501,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
           const room = roomState.participants;
 
           // Remove from cohost queue if present
-          const queueIndex = roomState.cohostQueue.findIndex(r => r.userId === userId);
+          const queueIndex = roomState.cohostQueue.findIndex(
+            r => r.userId === userId
+          );
           if (queueIndex !== -1) {
             roomState.cohostQueue.splice(queueIndex, 1);
             console.log('🚫 Removed from cohost queue on disconnect:', userId);
@@ -1279,34 +1511,46 @@ export async function registerRoutes(app: Express): Promise<Server> {
             // Notify host of updated queue
             const host = Array.from(room.values()).find(p => p.role === 'host');
             if (host && host.ws.readyState === WebSocket.OPEN) {
-              host.ws.send(JSON.stringify({
-                type: 'cohost_queue_updated',
-                streamId,
-                queue: roomState.cohostQueue.map(r => ({ userId: r.userId, timestamp: r.timestamp }))
-              }));
+              host.ws.send(
+                JSON.stringify({
+                  type: 'cohost_queue_updated',
+                  streamId,
+                  queue: roomState.cohostQueue.map(r => ({
+                    userId: r.userId,
+                    timestamp: r.timestamp
+                  }))
+                })
+              );
             }
           }
 
           // If disconnecting user is active guest, end cohost session
           if (role === 'guest' && roomState.activeGuestId === userId) {
             roomState.activeGuestId = null;
-            
+
             // Notify host with updated queue
             const host = Array.from(room.values()).find(p => p.role === 'host');
             if (host && host.ws.readyState === WebSocket.OPEN) {
-              host.ws.send(JSON.stringify({
-                type: 'cohost_ended',
-                streamId,
-                by: 'guest',
-                guestUserId: userId
-              }));
+              host.ws.send(
+                JSON.stringify({
+                  type: 'cohost_ended',
+                  streamId,
+                  by: 'guest',
+                  guestUserId: userId
+                })
+              );
 
               // Always send queue update (even if empty) to update host UI
-              host.ws.send(JSON.stringify({
-                type: 'cohost_queue_updated',
-                streamId,
-                queue: roomState.cohostQueue.map(r => ({ userId: r.userId, timestamp: r.timestamp }))
-              }));
+              host.ws.send(
+                JSON.stringify({
+                  type: 'cohost_queue_updated',
+                  streamId,
+                  queue: roomState.cohostQueue.map(r => ({
+                    userId: r.userId,
+                    timestamp: r.timestamp
+                  }))
+                })
+              );
             }
             console.log('🔚 Guest disconnected, cohost session ended');
           }
@@ -1315,11 +1559,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
           if (role === 'host' && roomState.activeGuestId) {
             const guest = room.get(roomState.activeGuestId);
             if (guest && guest.ws.readyState === WebSocket.OPEN) {
-              guest.ws.send(JSON.stringify({
-                type: 'cohost_ended',
-                streamId,
-                by: 'host'
-              }));
+              guest.ws.send(
+                JSON.stringify({
+                  type: 'cohost_ended',
+                  streamId,
+                  by: 'host'
+                })
+              );
             }
             roomState.activeGuestId = null;
             console.log('🔚 Host disconnected, cohost session ended');
@@ -1332,7 +1578,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
             roomSize: room.size,
             totalRooms: rooms.size
           });
-          
+
           if (room.size === 0) {
             rooms.delete(streamId);
             console.log(`🗑️ Room deleted (last participant left):`, {
@@ -1350,7 +1596,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
     });
 
-    ws.on('error', (err) => {
+    ws.on('error', err => {
       console.error('❌ WebSocket error:', err);
     });
   });
@@ -1385,12 +1631,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Periodic connection summary logging (every 60 seconds)
   setInterval(() => {
     if (rooms.size === 0) return; // Don't log if no active rooms
-    
+
     const summary = {
       timestamp: new Date().toISOString(),
       totalRooms: rooms.size,
-      totalParticipants: Array.from(rooms.values()).reduce((sum, r) => sum + r.participants.size, 0),
-      activeGuestSessions: Array.from(rooms.values()).filter(r => r.activeGuestId !== null).length
+      totalParticipants: Array.from(rooms.values()).reduce(
+        (sum, r) => sum + r.participants.size,
+        0
+      ),
+      activeGuestSessions: Array.from(rooms.values()).filter(
+        r => r.activeGuestId !== null
+      ).length
     };
     console.log('📊 Connection Summary:', summary);
   }, 60000);
@@ -1398,13 +1649,15 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Idle room reaper (every 30 seconds)
   const IDLE_TIMEOUT = 2 * 60 * 1000; // 2 minutes
   const roomLastHostSeen = new Map<string, number>();
-  
+
   setInterval(() => {
     const now = Date.now();
-    
+
     for (const [streamId, roomState] of Array.from(rooms.entries())) {
-      const hasHost = Array.from(roomState.participants.values()).some(p => p.role === 'host');
-      
+      const hasHost = Array.from(roomState.participants.values()).some(
+        p => p.role === 'host'
+      );
+
       if (hasHost) {
         // Reset timeout - host is present
         roomLastHostSeen.set(streamId, now);
@@ -1413,18 +1666,22 @@ export async function registerRoutes(app: Express): Promise<Server> {
         const lastSeen = roomLastHostSeen.get(streamId) || now;
         if (now - lastSeen > IDLE_TIMEOUT) {
           console.log('🧹 Reaping idle room (no host for 2 min):', streamId);
-          
+
           // Notify all participants
-          for (const participant of Array.from(roomState.participants.values())) {
+          for (const participant of Array.from(
+            roomState.participants.values()
+          )) {
             if (participant.ws.readyState === WebSocket.OPEN) {
-              participant.ws.send(JSON.stringify({
-                type: 'room_closed',
-                streamId,
-                reason: 'host_timeout'
-              }));
+              participant.ws.send(
+                JSON.stringify({
+                  type: 'room_closed',
+                  streamId,
+                  reason: 'host_timeout'
+                })
+              );
             }
           }
-          
+
           // Cleanup room
           coalescer.cleanup(streamId);
           rooms.delete(streamId);
@@ -1433,7 +1690,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         }
       }
     }
-    
+
     // Cleanup expired sessions
     sessionManager.cleanupExpired();
   }, 30000);

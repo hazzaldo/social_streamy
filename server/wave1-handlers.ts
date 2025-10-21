@@ -1,11 +1,19 @@
 import { WebSocket } from 'ws';
 import { MessageHandler, MessageContext } from './message-router';
 
+type Participant = {
+  ws: WebSocket;
+  userId: string;
+  streamId: string;
+  role: 'host' | 'viewer' | 'guest';
+  isIOSSafari?: boolean;
+};
+
 /**
  * Wave 1 Migration: Critical WebSocket handlers
- * 
+ *
  * Migrated types: join_stream, resume, webrtc_offer, webrtc_answer, ice_candidate
- * 
+ *
  * Features:
  * - Envelope + per-type payload validation (handled by router)
  * - msgId deduplication (handled by router)
@@ -17,9 +25,13 @@ import { MessageHandler, MessageContext } from './message-router';
  */
 
 // Helper to send message with backpressure check
-function sendMessage(ws: WebSocket, message: any, critical: boolean = true): boolean {
+function sendMessage(
+  ws: WebSocket,
+  message: any,
+  critical: boolean = true
+): boolean {
   if (ws.readyState !== WebSocket.OPEN) return false;
-  
+
   try {
     ws.send(JSON.stringify(message));
     return true;
@@ -35,8 +47,17 @@ function sendMessage(ws: WebSocket, message: any, critical: boolean = true): boo
  */
 export const handleJoinStream: MessageHandler = async (ws, msg, context) => {
   const { streamId, userId, isIOSSafari } = msg;
-  const { rooms, sessionManager, broadcastToRoom, currentParticipant: participantRef, sessionToken: sessionTokenRef, sendAck: ack, sendError: error, metrics } = context;
-  
+  const {
+    rooms,
+    sessionManager,
+    broadcastToRoom,
+    currentParticipant: participantRef,
+    sessionToken: sessionTokenRef,
+    sendAck: ack,
+    sendError: error,
+    metrics
+  } = context;
+
   if (!rooms || !sessionManager) {
     throw new Error('Missing required context: rooms, sessionManager');
   }
@@ -50,17 +71,27 @@ export const handleJoinStream: MessageHandler = async (ws, msg, context) => {
       gameState: { version: 0, data: null, gameId: null },
       rateLimits: new Map()
     });
-    console.log('🆕 [Wave1] Room created:', { streamId, totalRooms: rooms.size });
+    console.log('🆕 [Wave1] Room created:', {
+      streamId,
+      totalRooms: rooms.size
+    });
   }
-  
+
   const roomState = rooms.get(streamId)!;
   const room = roomState.participants;
 
   // Safety: Room capacity limit (max 100 participants)
   if (room.size >= 100 && !room.has(String(userId))) {
     console.warn('⚠️ [Wave1] Room at capacity:', { streamId, size: room.size });
-    error?.('room_full', 'This room has reached maximum capacity (100 participants)', msg.msgId);
-    metrics?.increment('errors_total', { code: 'room_full', type: 'join_stream' });
+    error?.(
+      'room_full',
+      'This room has reached maximum capacity (100 participants)',
+      msg.msgId
+    );
+    metrics?.increment('errors_total', {
+      code: 'room_full',
+      type: 'join_stream'
+    });
     return;
   }
 
@@ -68,23 +99,34 @@ export const handleJoinStream: MessageHandler = async (ws, msg, context) => {
   const role = room.size === 0 ? 'host' : 'viewer';
 
   // Add participant to room and update ref
-  const newParticipant = { ws, userId: String(userId), streamId, role, isIOSSafari: isIOSSafari || false };
+  const newParticipant = {
+    ws,
+    userId: String(userId),
+    streamId,
+    role,
+    isIOSSafari: isIOSSafari || false
+  };
   room.set(String(userId), newParticipant);
   if (participantRef) {
     (participantRef as any).current = newParticipant;
   }
 
   // Create session token for reconnection (preserve isIOSSafari for resume flows)
-  const sessionToken = sessionManager.createSession(String(userId), streamId, role, isIOSSafari || false);
-  
+  const sessionToken = sessionManager.createSession(
+    String(userId),
+    streamId,
+    role,
+    isIOSSafari || false
+  );
+
   // Propagate session token back to connection scope for disconnect cleanup
   if (sessionTokenRef) {
     (sessionTokenRef as any).current = sessionToken;
   }
 
-  console.log(`✅ [Wave1] ${role.toUpperCase()} joined stream:`, { 
-    streamId, 
-    userId, 
+  console.log(`✅ [Wave1] ${role.toUpperCase()} joined stream:`, {
+    streamId,
+    userId,
     roomSize: room.size,
     sessionToken
   });
@@ -101,7 +143,11 @@ export const handleJoinStream: MessageHandler = async (ws, msg, context) => {
   // If viewer joined, notify the host
   if (role === 'viewer') {
     const host = Array.from(room.values()).find((p: any) => p.role === 'host');
-    if (host && (host as any).ws && (host as any).ws.readyState === WebSocket.OPEN) {
+    if (
+      host &&
+      (host as any).ws &&
+      (host as any).ws.readyState === WebSocket.OPEN
+    ) {
       sendMessage((host as any).ws, {
         type: 'joined_stream',
         streamId,
@@ -145,8 +191,16 @@ export const handleJoinStream: MessageHandler = async (ws, msg, context) => {
  */
 export const handleResume: MessageHandler = async (ws, msg, context) => {
   const { sessionToken } = msg;
-  const { rooms, sessionManager, currentParticipant: participantRef, sessionToken: sessionTokenRef, sendAck: ack, sendError: error, metrics } = context;
-  
+  const {
+    rooms,
+    sessionManager,
+    currentParticipant: participantRef,
+    sessionToken: sessionTokenRef,
+    sendAck: ack,
+    sendError: error,
+    metrics
+  } = context;
+
   if (!rooms || !sessionManager) {
     throw new Error('Missing required context: rooms, sessionManager');
   }
@@ -154,7 +208,10 @@ export const handleResume: MessageHandler = async (ws, msg, context) => {
   const session = sessionManager.getSession(sessionToken);
   if (!session) {
     error?.('SESSION_EXPIRED', 'Session token expired or invalid', msg.msgId);
-    metrics?.increment('errors_total', { code: 'SESSION_EXPIRED', type: 'resume' });
+    metrics?.increment('errors_total', {
+      code: 'SESSION_EXPIRED',
+      type: 'resume'
+    });
     return;
   }
 
@@ -178,16 +235,22 @@ export const handleResume: MessageHandler = async (ws, msg, context) => {
   }
 
   const roomState = rooms.get(streamId)!;
-  
+
   // Restore participant with platform info and update ref
-  const restoredParticipant = { ws, userId, streamId, role: role as any, isIOSSafari: isIOSSafari || false };
+  const restoredParticipant = {
+    ws,
+    userId,
+    streamId,
+    role: role as any,
+    isIOSSafari: isIOSSafari || false
+  };
   roomState.participants.set(userId, restoredParticipant);
   if (participantRef) {
     (participantRef as any).current = restoredParticipant;
   }
 
   console.log('🔄 [Wave1] Session resumed:', { userId, streamId, role });
-  
+
   // Send resume confirmation with current game state
   sendMessage(ws, {
     type: 'resume_ok',
@@ -219,14 +282,99 @@ export const handleResume: MessageHandler = async (ws, msg, context) => {
  * webrtc_offer handler
  * Relays SDP offer with special 'host' resolution
  */
+
+/**
+ * request_offer handler
+ * A viewer asks the host to send them an SDP offer.
+ * We resolve the target host and relay the nudge.
+ */
+export const handleRequestOffer: MessageHandler = async (ws, msg, context) => {
+  // msg: { type:'request_offer', streamId, toUserId?:string, fromUserId?:string }
+  const {
+    rooms,
+    currentParticipant,
+    relayToUser,
+    sendAck: ack,
+    sendError: error
+  } = context;
+
+  // Prefer authenticated id from the connection; fall back to message
+  const viewerId =
+    (currentParticipant as any)?.userId ??
+    (msg?.fromUserId ? String(msg.fromUserId) : null);
+
+  // Stream resolution: use explicit streamId or the participant's room
+  const streamId =
+    msg?.streamId ?? (currentParticipant as any)?.streamId ?? null;
+
+  if (!viewerId || !streamId) {
+    return error?.('bad_request', 'streamId/fromUserId required', msg?.msgId);
+  }
+
+  if (!rooms) {
+    throw new Error('Missing required context: rooms');
+  }
+
+  const roomState = rooms.get(streamId)! as {
+    participants: Map<string, Participant>;
+  };
+  if (!roomState) {
+    return error?.('not_found', 'room not found', msg?.msgId);
+  }
+
+  // Resolve host userId:
+  // - if client sent a concrete toUserId (and not literal 'host'), use it
+  // - else find the current host in the room
+  let hostUserId: string | null = null;
+  if (msg?.toUserId && msg.toUserId !== 'host') {
+    hostUserId = String(msg.toUserId);
+  } else {
+    const host = Array.from(roomState.participants.values()).find(
+      (p: any) => p.role === 'host'
+    );
+    hostUserId = host ? String(host.userId) : null;
+  }
+
+  if (!hostUserId) {
+    return error?.('unavailable', 'host not connected', msg?.msgId);
+  }
+
+  // Relay the request to the host; include who asked
+  relayToUser?.(hostUserId, {
+    type: 'request_offer',
+    streamId,
+    fromUserId: viewerId
+  });
+
+  // Ack the viewer’s request
+  if (msg?.msgId) {
+    ack?.(msg.msgId, 'request_offer');
+  }
+};
+
 export const handleWebRTCOffer: MessageHandler = async (ws, msg, context) => {
   const { toUserId, fromUserId, sdp } = msg;
-  const { rooms, currentParticipant, relayToUser, sendAck: ack, metrics, debugSdp } = context;
+  const {
+    rooms,
+    currentParticipant,
+    relayToUser,
+    sendAck: ack,
+    metrics,
+    debugSdp
+  } = context;
 
   if (!debugSdp) {
-    console.log('📤 [Wave1] Relaying webrtc_offer', { from: fromUserId, to: toUserId, sdpType: sdp?.type });
+    console.log('📤 [Wave1] Relaying webrtc_offer', {
+      from: fromUserId,
+      to: toUserId,
+      sdpType: sdp?.type
+    });
   } else {
-    console.log('📤 [Wave1] Relaying webrtc_offer', { from: fromUserId, to: toUserId, sdp });
+    console.log('📤 [Wave1] Relaying webrtc_offer', {
+      from: fromUserId,
+      to: toUserId,
+      sdp
+    });
   }
 
   // Special handling: if toUserId is 'host', find the actual host in the room
@@ -234,10 +382,15 @@ export const handleWebRTCOffer: MessageHandler = async (ws, msg, context) => {
   if (toUserId === 'host' && currentParticipant && rooms) {
     const roomState = rooms.get((currentParticipant as any).streamId);
     if (roomState) {
-      const host = Array.from(roomState.participants.values()).find((p: any) => p.role === 'host');
+      const host = Array.from(roomState.participants.values()).find(
+        (p: any) => p.role === 'host'
+      );
       if (host) {
         actualToUserId = (host as any).userId;
-        console.log('✅ [Wave1] Resolved "host" to actual userId:', actualToUserId);
+        console.log(
+          '✅ [Wave1] Resolved "host" to actual userId:',
+          actualToUserId
+        );
       }
     }
   }
@@ -266,9 +419,17 @@ export const handleWebRTCAnswer: MessageHandler = async (ws, msg, context) => {
   const { relayToUser, sendAck: ack, metrics, debugSdp } = context;
 
   if (!debugSdp) {
-    console.log('📤 [Wave1] Relaying webrtc_answer', { from: fromUserId, to: toUserId, sdpType: sdp?.type });
+    console.log('📤 [Wave1] Relaying webrtc_answer', {
+      from: fromUserId,
+      to: toUserId,
+      sdpType: sdp?.type
+    });
   } else {
-    console.log('📤 [Wave1] Relaying webrtc_answer', { from: fromUserId, to: toUserId, sdp });
+    console.log('📤 [Wave1] Relaying webrtc_answer', {
+      from: fromUserId,
+      to: toUserId,
+      sdp
+    });
   }
 
   if (relayToUser) {
@@ -291,27 +452,38 @@ export const handleWebRTCAnswer: MessageHandler = async (ws, msg, context) => {
  */
 export const handleICECandidate: MessageHandler = async (ws, msg, context) => {
   const { toUserId, fromUserId, candidate } = msg;
-  const { 
-    rooms, 
-    currentParticipant, 
-    iceCandidateRateLimiter, 
+  const {
+    rooms,
+    currentParticipant,
+    iceCandidateRateLimiter,
     coalescer,
     relayToUser,
     sendAck: ack,
     sendError: error,
-    metrics 
+    metrics
   } = context;
 
   // Rate limiting: 50/sec, burst 100 - use authenticated userId
   if (iceCandidateRateLimiter && currentParticipant) {
-    const authenticatedUserId = (currentParticipant as any).userId || 'anonymous';
+    const authenticatedUserId =
+      (currentParticipant as any).userId || 'anonymous';
     const rateKey = `ice_${authenticatedUserId}`;
-    
+
     if (!iceCandidateRateLimiter.tryConsume(rateKey, 1)) {
-      error?.('rate_limited', 'Too many ICE candidates. Please slow down.', msg.msgId);
-      metrics?.increment('errors_total', { code: 'rate_limited', type: 'ice_candidate' });
+      error?.(
+        'rate_limited',
+        'Too many ICE candidates. Please slow down.',
+        msg.msgId
+      );
+      metrics?.increment('errors_total', {
+        code: 'rate_limited',
+        type: 'ice_candidate'
+      });
       metrics?.increment('rate_limited_ice_candidate');
-      console.warn('⚠️ [Wave1] ICE candidate rate limit exceeded:', authenticatedUserId);
+      console.warn(
+        '⚠️ [Wave1] ICE candidate rate limit exceeded:',
+        authenticatedUserId
+      );
       return;
     }
   }
@@ -321,7 +493,9 @@ export const handleICECandidate: MessageHandler = async (ws, msg, context) => {
   if (toUserId === 'host' && currentParticipant && rooms) {
     const roomState = rooms.get((currentParticipant as any).streamId);
     if (roomState) {
-      const host = Array.from(roomState.participants.values()).find((p: any) => p.role === 'host');
+      const host = Array.from(roomState.participants.values()).find(
+        (p: any) => p.role === 'host'
+      );
       if (host) {
         actualToUserId = (host as any).userId;
       }

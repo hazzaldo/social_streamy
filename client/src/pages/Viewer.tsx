@@ -22,6 +22,8 @@ import {
 } from '@/lib/webrtc-quality';
 import { DebugHUD } from '@/components/DebugHUD';
 
+import { hostSend, attachPcDebug, HLOG, HWARN, HERR } from '@/lib/rtc-debug';
+
 function wsUrl(path = '/ws') {
   const { protocol, host } = window.location;
   const wsProto = protocol === 'https:' ? 'wss:' : 'ws:';
@@ -82,7 +84,6 @@ export default function Viewer() {
   const guestVideoRef = useRef<HTMLVideoElement | null>(null);
   const localVideoRef = useRef<HTMLVideoElement | null>(null);
 
-  const wsRef = useRef<WebSocket | null>(null);
   const hostPcRef = useRef<RTCPeerConnection | null>(null);
   const guestPcRef = useRef<RTCPeerConnection | null>(null);
   const localStreamRef = useRef<MediaStream | null>(null);
@@ -103,6 +104,10 @@ export default function Viewer() {
   // ICE candidate logging flags
   const haveLoggedFirstHostIce = useRef(false);
   const haveLoggedFirstGuestIce = useRef(false);
+  const wsRef = useRef<WebSocket | null>(null);
+  // Component-scope sender usable anywhere in this component
+  const vSend = (payload: any) => hostSend(wsRef.current, payload);
+
   async function upgradeToGuest() {
     try {
       // Use platform-optimized constraints (720p @ 30fps, voice-optimized audio)
@@ -119,6 +124,8 @@ export default function Viewer() {
       // Create peer connection to host
       const pc = new RTCPeerConnection(ICE_CONFIG);
       guestPcRef.current = pc;
+
+      attachPcDebug(pc, 'guest');
 
       // Add local tracks
       stream.getTracks().forEach(track => {
@@ -175,15 +182,13 @@ export default function Viewer() {
 
       pc.onicecandidate = event => {
         if (event.candidate && wsRef.current?.readyState === WebSocket.OPEN) {
-          wsRef.current.send(
-            JSON.stringify({
-              type: 'ice_candidate',
-              streamId,
-              toUserId: hostIdRef.current ?? 'host', // ✅ fallback use the same real host id
-              fromUserId: userId,
-              candidate: event.candidate
-            })
-          );
+          vSend({
+            type: 'ice_candidate',
+            streamId,
+            toUserId: hostIdRef.current ?? 'host',
+            fromUserId: userId,
+            candidate: event.candidate
+          });
         }
       };
 
@@ -221,15 +226,13 @@ export default function Viewer() {
       await pc.setLocalDescription(offer);
       console.log('[VIEWER] Sending cohost_offer to host');
 
-      wsRef.current?.send(
-        JSON.stringify({
-          type: 'cohost_offer',
-          streamId,
-          toUserId: hostIdRef.current ?? 'host', // ✅
-          fromUserId: userId,
-          sdp: offer
-        })
-      );
+      vSend({
+        type: 'cohost_offer',
+        streamId,
+        toUserId: hostIdRef.current ?? 'host',
+        fromUserId: userId,
+        sdp: offer
+      });
     } catch (error) {
       toast({
         title: 'Camera Error',
@@ -260,6 +263,9 @@ export default function Viewer() {
       const ws = new WebSocket(wsUrl('/ws'));
       wsRef.current = ws;
 
+      // Helper that logs and safely sends
+      const send = (payload: any) => hostSend(wsRef.current, payload);
+
       /*************  ✨ Windsurf Command ⭐  *************/
       /**
        * WebSocket onopen event handler.
@@ -284,15 +290,21 @@ export default function Viewer() {
           /Safari/.test(navigator.userAgent);
 
         // Join as viewer or guest
-        ws.send(
-          JSON.stringify({
-            type: 'join_stream',
-            streamId,
-            role: roleRef.current,
-            userId,
-            isIOSSafari
-          })
-        );
+        send({
+          type: 'join_stream',
+          streamId,
+          role: roleRef.current,
+          userId,
+          isIOSSafari
+        });
+
+        // Ask the host for an offer (safety net)
+        send({
+          type: 'request_offer',
+          streamId,
+          toUserId: hostIdRef.current ?? 'host',
+          fromUserId: userId
+        });
 
         // Start heartbeat
         if (heartbeatIntervalRef.current != null) {
@@ -301,18 +313,16 @@ export default function Viewer() {
         }
         heartbeatIntervalRef.current = window.setInterval(() => {
           if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: 'ping', ts: Date.now() }));
+            send({ type: 'ping', ts: Date.now() });
           }
         }, 25000);
 
         // Sync game state
         if (gameState.gameId) {
-          ws.send(
-            JSON.stringify({
-              type: 'game_sync',
-              streamId
-            })
-          );
+          send({
+            type: 'game_sync',
+            streamId
+          });
         }
       };
 
@@ -361,6 +371,7 @@ export default function Viewer() {
 
       ws.onmessage = async event => {
         const msg = JSON.parse(event.data);
+        HLOG('WS ←', msg.type, msg);
 
         if (msg.type === 'webrtc_offer' && msg.toUserId === userId) {
           await handleHostOffer(msg.sdp, msg.metadata);
@@ -742,6 +753,7 @@ export default function Viewer() {
     if (hostPcRef.current) hostPcRef.current.close();
     const pc = new RTCPeerConnection(ICE_CONFIG);
     hostPcRef.current = pc;
+    attachPcDebug(pc, 'host');
 
     // 2) ontrack: attach stream
     pc.ontrack = e => {
@@ -761,15 +773,13 @@ export default function Viewer() {
     pc.onicecandidate = event => {
       if (event.candidate && wsRef.current?.readyState === WebSocket.OPEN) {
         const destHostId = metadata?.hostUserId ?? hostIdRef.current ?? 'host';
-        wsRef.current.send(
-          JSON.stringify({
-            type: 'ice_candidate',
-            streamId,
-            toUserId: destHostId,
-            fromUserId: userId,
-            candidate: event.candidate
-          })
-        );
+        vSend({
+          type: 'ice_candidate',
+          streamId,
+          toUserId: destHostId,
+          fromUserId: userId,
+          candidate: event.candidate
+        });
       }
     };
 
@@ -795,15 +805,13 @@ export default function Viewer() {
     await pc.setLocalDescription(answer);
 
     const destHostId = metadata?.hostUserId ?? hostIdRef.current ?? 'host';
-    wsRef.current?.send(
-      JSON.stringify({
-        type: 'webrtc_answer',
-        streamId,
-        toUserId: destHostId,
-        fromUserId: userId,
-        sdp: answer
-      })
-    );
+    vSend({
+      type: 'webrtc_answer',
+      streamId,
+      toUserId: destHostId,
+      fromUserId: userId,
+      sdp: answer
+    });
   }
 
   function joinStream() {
@@ -813,14 +821,12 @@ export default function Viewer() {
   function requestCohost() {
     console.log('[VIEWER] cohost_request sent');
     setCohostRequestState('pending');
-    wsRef.current?.send(
-      JSON.stringify({
-        type: 'cohost_request',
-        streamId,
-        userId,
-        fromUserId: userId // add this for consistency with other messages
-      })
-    );
+    vSend({
+      type: 'cohost_request',
+      streamId,
+      userId,
+      fromUserId: userId
+    });
 
     toast({
       title: 'Request Sent',
@@ -830,30 +836,24 @@ export default function Viewer() {
 
   function cancelCohostRequest() {
     setCohostRequestState('idle');
-    wsRef.current?.send(
-      JSON.stringify({
-        type: 'cohost_cancel',
-        streamId,
-        userId
-      })
-    );
+    vSend({
+      type: 'cohost_cancel',
+      streamId,
+      userId,
+      fromUserId: userId
+    });
   }
 
   function submitGameInput() {
     if (!gameInput.trim() || !gameState.gameId) return;
 
-    wsRef.current?.send(
-      JSON.stringify({
-        type: 'game_event',
-        streamId,
-        eventType: 'player_submission',
-        payload: {
-          submission: gameInput,
-          round: gameState.data?.round || 1
-        },
-        from: userId
-      })
-    );
+    vSend({
+      type: 'game_event',
+      streamId,
+      eventType: 'player_submission',
+      payload: { submission: gameInput, round: gameState.data?.round || 1 },
+      from: userId
+    });
 
     setGameInput('');
 
@@ -1083,14 +1083,12 @@ export default function Viewer() {
             onRequestKeyframe={() => {
               // Send WS message to host to trigger keyframe generation
               if (wsRef.current?.readyState === WebSocket.OPEN) {
-                wsRef.current.send(
-                  JSON.stringify({
-                    type: 'request_keyframe',
-                    streamId,
-                    toUserId: hostIdRef.current ?? 'host', // ✅ route to actual host
-                    fromUserId: userId // ✅ so Host can find the PC
-                  })
-                );
+                vSend({
+                  type: 'request_keyframe',
+                  streamId,
+                  toUserId: hostIdRef.current ?? 'host',
+                  fromUserId: userId
+                });
                 toast({
                   title: 'Keyframe Requested',
                   description: 'Sent request to host'

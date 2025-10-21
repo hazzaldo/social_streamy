@@ -25,6 +25,8 @@ import {
   type AdaptiveQualityManager
 } from '@/lib/webrtc-quality';
 
+import { hostSend, attachPcDebug, HLOG, HWARN, HERR } from '@/lib/rtc-debug';
+
 function wsUrl(path = '/ws') {
   const { protocol, host } = window.location;
   const wsProto = protocol === 'https:' ? 'wss:' : 'ws:';
@@ -128,20 +130,20 @@ export default function Host() {
     function connect() {
       const ws = new WebSocket(wsUrl('/ws'));
       wsRef.current = ws;
+      // Helper that logs and safely sends
+      const send = (payload: any) => hostSend(wsRef.current, payload);
 
       ws.onopen = () => {
         setWsConnected(true);
         reconnectAttemptsRef.current = 0;
 
         // Join as host
-        ws.send(
-          JSON.stringify({
-            type: 'join_stream',
-            streamId,
-            role: 'host',
-            userId
-          })
-        );
+        send({
+          type: 'join_stream',
+          streamId,
+          role: 'host',
+          userId
+        });
 
         // Start heartbeat
         if (heartbeatIntervalRef.current) {
@@ -149,7 +151,10 @@ export default function Host() {
         }
         heartbeatIntervalRef.current = setInterval(() => {
           if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: 'ping', ts: Date.now() }));
+            send({
+              type: 'ping',
+              ts: Date.now()
+            });
           }
         }, 25000);
       };
