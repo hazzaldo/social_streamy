@@ -1,7 +1,6 @@
 import type { Express } from 'express';
 import { createServer, type Server } from 'http';
 import { WebSocketServer, WebSocket } from 'ws';
-import { storage } from './storage';
 import {
   MessageDeduplicator,
   TokenBucketRateLimiter,
@@ -19,15 +18,9 @@ import {
   handleResume,
   handleWebRTCOffer,
   handleWebRTCAnswer,
-  handleICECandidate
+  handleICECandidate,
+  handleRequestOffer
 } from './wave1-handlers';
-
-import { handleRequestOffer } from './wave1-handlers';
-
-export const routes = {
-  // …existing routes
-  request_offer: handleRequestOffer
-};
 
 // In-memory room and participant tracking
 interface Participant {
