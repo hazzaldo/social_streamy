@@ -400,6 +400,7 @@ export const handleWebRTCOffer: MessageHandler = async (ws, msg, context) => {
     relayToUser(actualToUserId, {
       type: 'webrtc_offer',
       fromUserId: String(fromUserId),
+      toUserId: actualToUserId,
       sdp
     });
   }
@@ -436,6 +437,7 @@ export const handleWebRTCAnswer: MessageHandler = async (ws, msg, context) => {
     relayToUser(toUserId, {
       type: 'webrtc_answer',
       fromUserId: String(fromUserId),
+      toUserId,
       sdp
     });
   }
@@ -521,6 +523,7 @@ export const handleICECandidate: MessageHandler = async (ws, msg, context) => {
             relayToUser(coalescedMsg.toUserId, {
               type: 'ice_candidate',
               fromUserId: coalescedMsg.fromUserId,
+              toUserId: coalescedMsg.toUserId,
               candidate: coalescedMsg.candidate
             });
           }
@@ -532,6 +535,7 @@ export const handleICECandidate: MessageHandler = async (ws, msg, context) => {
     relayToUser(actualToUserId, {
       type: 'ice_candidate',
       fromUserId: String(fromUserId),
+      toUserId: actualToUserId,
       candidate
     });
   }

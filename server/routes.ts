@@ -822,6 +822,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           relayToUser(actualToUserId, {
             type: 'webrtc_offer',
             fromUserId: String(fromUserId),
+            toUserId: actualToUserId,
             sdp
           });
           break;
@@ -843,6 +844,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
           relayToUser(toUserId, {
             type: 'webrtc_answer',
             fromUserId: String(fromUserId),
+            toUserId,
             sdp
           });
           break;
@@ -904,11 +906,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
               },
               messages => {
                 // Flush coalesced candidates
-                for (const msg of messages) {
-                  relayToUser(msg.toUserId, {
+                for (const m of messages) {
+                  relayToUser(m.toUserId, {
                     type: 'ice_candidate',
-                    fromUserId: msg.fromUserId,
-                    candidate: msg.candidate
+                    fromUserId: m.fromUserId,
+                    toUserId: m.toUserId,
+                    candidate: m.candidate
                   });
                 }
               }

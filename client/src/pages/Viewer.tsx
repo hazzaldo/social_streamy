@@ -105,6 +105,9 @@ export default function Viewer() {
   const haveLoggedFirstHostIce = useRef(false);
   const haveLoggedFirstGuestIce = useRef(false);
   const wsRef = useRef<WebSocket | null>(null);
+  const gameIdRef = useRef<string | null>(null);
+  const isConnectingRef = useRef(false);
+
   // Component-scope sender usable anywhere in this component
   const vSend = (payload: any) => hostSend(wsRef.current, payload);
 
@@ -151,10 +154,13 @@ export default function Viewer() {
         if (hostVideoRef.current) {
           hostVideoRef.current.srcObject = stream;
           // Explicit play() call with autoplay fallback
-          hostVideoRef.current.play().catch(err => {
-            console.warn('[VIEWER] Autoplay blocked:', err);
-            setAutoplayBlocked(true);
-          });
+          hostVideoRef.current
+            .play()
+            .then(() => setAutoplayBlocked(false))
+            .catch(err => {
+              console.warn('[VIEWER] Autoplay blocked:', err);
+              setAutoplayBlocked(true);
+            });
 
           // 5s keyframe watchdog for video tracks
           if (event.track.kind === 'video') {
@@ -249,6 +255,11 @@ export default function Viewer() {
     roleRef.current = role;
   }, [role]);
 
+  // Keep latest gameId for reconnections
+  useEffect(() => {
+    gameIdRef.current = gameState.gameId;
+  }, [gameState.gameId]);
+
   // Set build tag for cache-busting verification
   useEffect(() => {
     (window as any).__BUILD_TAG__ = 'WAVE3-H264-MVP';
@@ -260,6 +271,9 @@ export default function Viewer() {
     if (!isJoined) return;
 
     function connect() {
+      if (isConnectingRef.current) return;
+      isConnectingRef.current = true;
+
       const ws = new WebSocket(wsUrl('/ws'));
       wsRef.current = ws;
 
@@ -274,6 +288,8 @@ export default function Viewer() {
        * Resets reconnect attempts counter.
       /*******  77c63eae-9855-4fb6-a251-e6ba2b01a220  *******/
       ws.onopen = () => {
+        isConnectingRef.current = false;
+
         setWsConnected(true);
         setIsReconnecting(false); // optional: drop banner immediately
         reconnectAttemptsRef.current = 0;
@@ -318,7 +334,7 @@ export default function Viewer() {
         }, 25000);
 
         // Sync game state
-        if (gameState.gameId) {
+        if (gameIdRef.current) {
           send({
             type: 'game_sync',
             streamId
@@ -327,6 +343,8 @@ export default function Viewer() {
       };
 
       ws.onerror = e => {
+        isConnectingRef.current = false;
+
         console.warn('[WS] error', e);
         // optional UX
         toast({
@@ -336,6 +354,8 @@ export default function Viewer() {
       };
 
       ws.onclose = () => {
+        isConnectingRef.current = false;
+
         setWsConnected(false);
 
         // stop heartbeat
@@ -370,10 +390,19 @@ export default function Viewer() {
       };
 
       ws.onmessage = async event => {
-        const msg = JSON.parse(event.data);
+        let msg: any;
+        try {
+          msg = JSON.parse(event.data as string);
+        } catch (err) {
+          console.warn('[WS] dropped non-JSON message', err, event.data);
+          return;
+        }
         HLOG('WS ←', msg.type, msg);
 
-        if (msg.type === 'webrtc_offer' && msg.toUserId === userId) {
+        if (
+          msg.type === 'webrtc_offer' &&
+          (msg.toUserId === userId || !('toUserId' in msg))
+        ) {
           await handleHostOffer(msg.sdp, msg.metadata);
         } else if (
           msg.type === 'ice_candidate' &&
@@ -490,13 +519,12 @@ export default function Viewer() {
           toast({
             title: shouldDisable ? 'Camera Off by Host' : 'Camera On by Host'
           });
-        } else if (msg.type === 'game_init' && msg.initialState) {
+        } else if (msg.type === 'game_init') {
           setGameState({
-            version: 1,
-            data: msg.initialState,
+            version: msg.version ?? 1,
+            data: msg.initialState ?? null,
             gameId: msg.gameId
           });
-
           toast({
             title: 'Game Started!',
             description: `Playing ${msg.gameId}`
@@ -514,9 +542,11 @@ export default function Viewer() {
     connect();
 
     return () => {
+      isConnectingRef.current = false;
       // Close WebSocket
       if (wsRef.current) {
         wsRef.current.close();
+        wsRef.current = null;
       }
 
       // Clear timers
@@ -750,7 +780,25 @@ export default function Viewer() {
     }
 
     // 1) New PC
-    if (hostPcRef.current) hostPcRef.current.close();
+    // 1) New PC (full cleanup before recreating)
+    if (hostPcRef.current) {
+      try {
+        hostPcRef.current.onicecandidate = null;
+        hostPcRef.current.ontrack = null;
+        hostPcRef.current.onconnectionstatechange = null;
+        hostPcRef.current.oniceconnectionstatechange = null;
+        // (Optional) if you ever add local tracks on the viewer side, stop them here:
+        // hostPcRef.current.getSenders().forEach(s => s.track?.stop?.());
+        hostPcRef.current.close();
+      } catch (e) {
+        console.warn('[VIEWER] error closing previous host pc:', e);
+      }
+      hostPcRef.current = null;
+    }
+
+    haveLoggedFirstHostIce.current = false;
+    haveLoggedFirstGuestIce.current = false;
+
     const pc = new RTCPeerConnection(ICE_CONFIG);
     hostPcRef.current = pc;
     attachPcDebug(pc, 'host');
@@ -761,10 +809,16 @@ export default function Viewer() {
       if (!stream || !hostVideoRef.current) return;
 
       const video = hostVideoRef.current;
-      video.muted = true;
+      video.muted = isMuted;
       video.playsInline = true;
       video.srcObject = stream;
       video.play().catch(() => setAutoplayBlocked(true));
+
+      video.srcObject = stream;
+      video
+        .play()
+        .then(() => setAutoplayBlocked(false))
+        .catch(() => setAutoplayBlocked(true));
 
       requestKeyFrame(pc);
     };
@@ -866,9 +920,10 @@ export default function Viewer() {
   function unmute() {
     if (hostVideoRef.current) {
       hostVideoRef.current.muted = false;
-      setIsMuted(false);
-      setAutoplayBlocked(false);
+      hostVideoRef.current.play?.().catch(() => {});
     }
+    setIsMuted(false);
+    setAutoplayBlocked(false);
   }
 
   return (
