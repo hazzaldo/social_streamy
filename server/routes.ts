@@ -244,23 +244,32 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   const httpServer = createServer(app);
 
-  // WebSocket server on /ws path
-  const wss = new WebSocketServer({
-    server: httpServer,
-    path: '/ws',
-    // Phase 1: WebSocket origin validation
-    verifyClient: (info: { origin: string; req: any }) => {
-      const origin = info.origin || info.req.headers.origin;
-      const isValid = validateWebSocketOrigin(origin);
-      if (!isValid) {
-        console.warn(
-          '🚫 WebSocket connection rejected - invalid origin:',
-          origin
-        );
-        metrics.increment('ws_rejected_origin');
-      }
-      return isValid;
+  // Create WS server in noServer mode (we'll gate at HTTP upgrade)
+  const wss = new WebSocketServer({ noServer: true });
+
+  // Intercept HTTP upgrade and validate origin + path before upgrading
+  httpServer.on('upgrade', (req, socket, head) => {
+    // Only handle our WS endpoint
+    const pathname = new URL(req.url!, `http://${req.headers.host}`).pathname;
+    if (pathname !== '/ws') {
+      socket.destroy();
+      return;
     }
+
+    const origin = req.headers.origin as string | undefined;
+    const isValid = validateWebSocketOrigin(origin);
+    if (!isValid) {
+      console.warn('🚫 WebSocket upgrade rejected - invalid origin:', origin);
+      metrics.increment('ws_rejected_origin');
+      socket.write('HTTP/1.1 403 Forbidden\r\n\r\n');
+      socket.destroy();
+      return;
+    }
+
+    // Hand off to ws only if valid
+    wss.handleUpgrade(req, socket, head, ws => {
+      wss.emit('connection', ws, req);
+    });
   });
 
   wss.on('connection', (ws: WebSocket) => {
@@ -372,30 +381,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
       };
 
       // Helper functions for routing (used by both router and legacy)
-      const relayToUser = (userId: string, message: any) => {
-        for (const roomState of Array.from(rooms.values())) {
-          const participant = roomState.participants.get(String(userId));
-          if (participant && participant.ws.readyState === WebSocket.OPEN) {
-            sendMessage(participant.ws, message);
-            return true;
-          }
-        }
-        console.warn('⚠️ User not found for relay:', userId);
-        return false;
-      };
-
-      const broadcastToRoom = (streamId: string, message: any) => {
-        const roomState = rooms.get(streamId);
-        if (!roomState) {
-          console.warn('⚠️ Room not found for broadcast:', streamId);
-          return;
-        }
-        for (const participant of Array.from(roomState.participants.values())) {
-          if (participant.ws.readyState === WebSocket.OPEN) {
-            sendMessage(participant.ws, message);
-          }
-        }
-      };
 
       // Phase 2: Try router first if enabled (shim pattern - reuse already-parsed message)
       let handled = false;
@@ -480,7 +465,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
         case 'resume': {
           // Session resume
-          const { sessionToken: token, roomId } = msg;
+          const { sessionToken: token } = msg;
           if (!token) {
             sendMessage(ws, {
               type: 'error',
@@ -1595,23 +1580,26 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // Helper functions
-  function relayToUser(userId: string, message: any) {
+  function relayToUser(userId: string, message: any): boolean {
     // Find user across all rooms
     for (const roomState of Array.from(rooms.values())) {
       const participant = roomState.participants.get(String(userId));
       if (participant && participant.ws.readyState === WebSocket.OPEN) {
         participant.ws.send(JSON.stringify(message));
         console.log('✅ Relayed to user:', userId, message.type);
-        return;
+        return true;
       }
     }
     console.warn('⚠️ User not found for relay:', userId);
+    return false;
   }
 
-  function broadcastToRoom(streamId: string, message: any) {
+  function broadcastToRoom(streamId: string, message: any): void {
     const roomState = rooms.get(streamId);
-    if (!roomState) return;
-
+    if (!roomState) {
+      console.warn('⚠️ Room not found for broadcast:', streamId);
+      return;
+    }
     for (const participant of Array.from(roomState.participants.values())) {
       if (participant.ws.readyState === WebSocket.OPEN) {
         participant.ws.send(JSON.stringify(message));
