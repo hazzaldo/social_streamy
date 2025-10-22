@@ -186,14 +186,34 @@ export default function Viewer() {
         requestKeyFrame(pc);
       };
 
-      pc.onicecandidate = event => {
-        if (event.candidate && wsRef.current?.readyState === WebSocket.OPEN) {
+      // 3) ICE out (➕ add type)
+      pc.onicecandidate = (event: RTCPeerConnectionIceEvent) => {
+        const destHostId = hostIdRef.current;
+        if (!destHostId) {
+          console.warn('[VIEWER] No hostId yet for ICE');
+          return;
+        }
+        if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+          console.warn('[VIEWER] WS not open for ICE');
+          return;
+        }
+
+        if (event.candidate) {
           vSend({
             type: 'ice_candidate',
             streamId,
-            toUserId: hostIdRef.current ?? 'host',
+            toUserId: destHostId,
             fromUserId: userId,
             candidate: event.candidate
+          });
+        } else {
+          // explicit end-of-candidates
+          vSend({
+            type: 'ice_candidate',
+            streamId,
+            toUserId: destHostId,
+            fromUserId: userId,
+            candidate: null
           });
         }
       };
@@ -232,10 +252,15 @@ export default function Viewer() {
       await pc.setLocalDescription(offer);
       console.log('[VIEWER] Sending cohost_offer to host');
 
+      const destHostId = hostIdRef.current;
+      if (!destHostId) {
+        console.warn('[VIEWER] No hostId for cohost_offer');
+        return;
+      }
       vSend({
         type: 'cohost_offer',
         streamId,
-        toUserId: hostIdRef.current ?? 'host',
+        toUserId: destHostId,
         fromUserId: userId,
         sdp: offer
       });
@@ -314,14 +339,6 @@ export default function Viewer() {
           isIOSSafari
         });
 
-        // Ask the host for an offer (safety net)
-        send({
-          type: 'request_offer',
-          streamId,
-          toUserId: hostIdRef.current ?? 'host',
-          fromUserId: userId
-        });
-
         // Start heartbeat
         if (heartbeatIntervalRef.current != null) {
           window.clearInterval(heartbeatIntervalRef.current);
@@ -398,6 +415,10 @@ export default function Viewer() {
           return;
         }
         HLOG('WS ←', msg.type, msg);
+        // If we somehow didn't catch the host id yet, learn it from any message
+        if (!hostIdRef.current && typeof msg.fromUserId === 'string') {
+          hostIdRef.current = msg.fromUserId;
+        }
 
         if (
           msg.type === 'webrtc_offer' &&
@@ -407,7 +428,7 @@ export default function Viewer() {
         } else if (
           msg.type === 'ice_candidate' &&
           msg.toUserId === userId && // <-- we only accept ICE addressed to us
-          msg.candidate
+          msg.candidate !== undefined // ✅ allow real candidates OR null (EOC)
         ) {
           const pc =
             roleRef.current === 'guest'
@@ -417,7 +438,10 @@ export default function Viewer() {
           // Log first ICE candidate once per connection
 
           // Optional logging
-          if (msg.fromUserId === 'host' && !haveLoggedFirstHostIce.current) {
+          if (
+            msg.fromUserId === hostIdRef.current &&
+            !haveLoggedFirstHostIce.current
+          ) {
             console.log('[VIEWER] First ICE candidate received from host');
             haveLoggedFirstHostIce.current = true;
           } else if (
@@ -432,7 +456,9 @@ export default function Viewer() {
             haveLoggedFirstGuestIce.current = true;
           }
           try {
-            await pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
+            await pc.addIceCandidate(
+              msg.candidate ? new RTCIceCandidate(msg.candidate) : undefined // ✅ TS-safe EOC
+            );
           } catch (err) {
             console.warn('[VIEWER] addIceCandidate failed:', err);
           }
@@ -777,9 +803,9 @@ export default function Viewer() {
   ) {
     if (metadata?.hostUserId) {
       hostIdRef.current = metadata.hostUserId; // ✅ remember host’s id
+      console.log('[VIEWER] hostId set to', hostIdRef.current);
     }
 
-    // 1) New PC
     // 1) New PC (full cleanup before recreating)
     if (hostPcRef.current) {
       try {
@@ -787,8 +813,6 @@ export default function Viewer() {
         hostPcRef.current.ontrack = null;
         hostPcRef.current.onconnectionstatechange = null;
         hostPcRef.current.oniceconnectionstatechange = null;
-        // (Optional) if you ever add local tracks on the viewer side, stop them here:
-        // hostPcRef.current.getSenders().forEach(s => s.track?.stop?.());
         hostPcRef.current.close();
       } catch (e) {
         console.warn('[VIEWER] error closing previous host pc:', e);
@@ -803,34 +827,90 @@ export default function Viewer() {
     hostPcRef.current = pc;
     attachPcDebug(pc, 'host');
 
-    // 2) ontrack: attach stream
-    pc.ontrack = e => {
+    // 🔎 extra visibility
+    console.log('[VIEWER] handleHostOffer() – creating PC');
+    // 🔎 extra visibility + resend answer when ICE becomes connected
+    // 1) ICE connection changes: log, resend, and recovery
+    pc.oniceconnectionstatechange = () => {
+      console.log('[VIEWER] iceConnection:', pc.iceConnectionState);
+
+      if (
+        pc.iceConnectionState === 'connected' ||
+        pc.iceConnectionState === 'completed'
+      ) {
+        // success → clear recovery + (optional) resend answer
+        clearRecoveryState('host');
+
+        const dest = hostIdRef.current;
+        const sdp = pc.localDescription; // your answer
+        if (dest && sdp && wsRef.current?.readyState === WebSocket.OPEN) {
+          console.log('[VIEWER] (ICE connected) resend webrtc_answer to', dest);
+          vSend({
+            type: 'webrtc_answer',
+            streamId,
+            toUserId: dest,
+            fromUserId: userId,
+            sdp
+          });
+        }
+      } else if (
+        pc.iceConnectionState === 'failed' ||
+        pc.iceConnectionState === 'disconnected'
+      ) {
+        attemptRecovery('host', pc);
+      }
+    };
+
+    // 2) Remote tracks → attach video (keep muted first for autoplay)
+    pc.ontrack = (e: RTCTrackEvent) => {
       const [stream] = e.streams;
       if (!stream || !hostVideoRef.current) return;
 
       const video = hostVideoRef.current;
-      video.muted = isMuted;
+      // Ensure autoplay compliance: set muted BEFORE setting srcObject
+      video.muted = true; // keep true until user unmutes
+      setIsMuted(true);
       video.playsInline = true;
-
       video.srcObject = stream;
+
       video
         .play()
         .then(() => setAutoplayBlocked(false))
         .catch(() => setAutoplayBlocked(true));
 
+      // low-latency + faster first frame
       requestKeyFrame(pc);
+      setTimeout(() => requestKeyFrame(pc), 200);
     };
 
-    // 3) ICE out
-    pc.onicecandidate = event => {
-      if (event.candidate && wsRef.current?.readyState === WebSocket.OPEN) {
-        const destHostId = metadata?.hostUserId ?? hostIdRef.current ?? 'host';
+    // ADD THIS (host PC sends its candidates to the host)
+    pc.onicecandidate = (event: RTCPeerConnectionIceEvent) => {
+      const destHostId = hostIdRef.current;
+      if (!destHostId) {
+        console.warn('[VIEWER] No hostId yet for ICE');
+        return;
+      }
+      if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+        console.warn('[VIEWER] WS not open for ICE');
+        return;
+      }
+
+      if (event.candidate) {
         vSend({
           type: 'ice_candidate',
           streamId,
           toUserId: destHostId,
           fromUserId: userId,
           candidate: event.candidate
+        });
+      } else {
+        // explicit end-of-candidates
+        vSend({
+          type: 'ice_candidate',
+          streamId,
+          toUserId: destHostId,
+          fromUserId: userId,
+          candidate: null
         });
       }
     };
@@ -846,24 +926,52 @@ export default function Viewer() {
       }
     };
 
-    // 4) IMPORTANT: do NOT add transceivers here; just apply the host's offer
-    await pc.setRemoteDescription(new RTCSessionDescription(sdp));
+    // 4) Apply host offer (no wrapper)
+    await pc.setRemoteDescription(sdp);
+    console.log('[VIEWER] setRemoteDescription OK');
 
-    // 5) Create/send answer (you can keep OPUS FEC/DTX tweak if you want)
+    // 5) Create/send answer (+ safety resend)
     const answer = await pc.createAnswer();
     if (answer.sdp) {
       answer.sdp = enableOpusFecDtx(answer.sdp);
     }
     await pc.setLocalDescription(answer);
+    console.log('[VIEWER] setLocalDescription(answer) OK');
 
-    const destHostId = metadata?.hostUserId ?? hostIdRef.current ?? 'host';
-    vSend({
-      type: 'webrtc_answer',
-      streamId,
-      toUserId: destHostId,
-      fromUserId: userId,
-      sdp: answer
-    });
+    // OPTIONAL: ask for a keyframe now that the answer is in place
+    setTimeout(() => requestKeyFrame(pc), 200);
+
+    const destHostId = hostIdRef.current;
+    if (!destHostId) {
+      console.warn('[VIEWER] No hostId for webrtc_answer');
+      return;
+    }
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      console.log('[VIEWER] → WS webrtc_answer to', destHostId);
+      vSend({
+        type: 'webrtc_answer',
+        streamId,
+        toUserId: destHostId,
+        fromUserId: userId,
+        sdp: answer
+      });
+
+      // Safety: resend once after 750ms in case first frame is lost
+      setTimeout(() => {
+        if (wsRef.current?.readyState === WebSocket.OPEN) {
+          console.log('[VIEWER] (safety) resend webrtc_answer to', destHostId);
+          vSend({
+            type: 'webrtc_answer',
+            streamId,
+            toUserId: destHostId,
+            fromUserId: userId,
+            sdp: answer
+          });
+        }
+      }, 750);
+    } else {
+      console.warn('[VIEWER] WS not open when trying to send answer');
+    }
   }
 
   function joinStream() {
@@ -1136,10 +1244,15 @@ export default function Viewer() {
             onRequestKeyframe={() => {
               // Send WS message to host to trigger keyframe generation
               if (wsRef.current?.readyState === WebSocket.OPEN) {
+                const destHostId = hostIdRef.current;
+                if (!destHostId) {
+                  console.warn('[VIEWER] No hostId for request_keyframe');
+                  return;
+                }
                 vSend({
                   type: 'request_keyframe',
                   streamId,
-                  toUserId: hostIdRef.current ?? 'host',
+                  toUserId: destHostId,
                   fromUserId: userId
                 });
                 toast({
