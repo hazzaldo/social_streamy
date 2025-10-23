@@ -27,7 +27,8 @@ export default defineConfig({
       include: [
         'src/App.tsx',
         'src/lib/utils.ts',
-        'src/lib/wsUrl.ts'
+        'src/lib/wsUrl.ts',
+        'src/lib/webrtc-quality.ts'
         // 'src/lib/rtc-debug.ts',    // add after a few more tests
       ],
       exclude: [
