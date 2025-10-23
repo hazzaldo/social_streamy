@@ -3,6 +3,9 @@ import react from '@vitejs/plugin-react';
 import path from 'path';
 import runtimeErrorOverlay from '@replit/vite-plugin-runtime-error-modal';
 
+// small helper so we don't repeat path.resolve
+const r = (...p: string[]) => path.resolve(import.meta.dirname, ...p);
+
 export default defineConfig({
   plugins: [
     react(),
@@ -19,6 +22,7 @@ export default defineConfig({
         ]
       : [])
   ],
+
   resolve: {
     alias: {
       '@': path.resolve(import.meta.dirname, 'client', 'src'),
@@ -26,11 +30,14 @@ export default defineConfig({
       '@assets': path.resolve(import.meta.dirname, 'attached_assets')
     }
   },
+
   root: path.resolve(import.meta.dirname, 'client'),
+
   build: {
     outDir: path.resolve(import.meta.dirname, 'dist/public'),
     emptyOutDir: true
   },
+
   server: {
     proxy: {
       '/api': { target: 'http://localhost:5050', changeOrigin: true },
@@ -38,4 +45,6 @@ export default defineConfig({
     },
     fs: { strict: true, deny: ['**/.*'] }
   }
+
+  // inside export default defineConfig({ test: { ... } })
 });

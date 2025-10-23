@@ -1,6 +1,6 @@
 /**
  * WebRTC Quality Management
- * 
+ *
  * Adaptive encoding, codec preferences, and quality optimization
  * for Social Streamy platform.
  */
@@ -18,7 +18,7 @@ export const MEDIA_CONSTRAINTS: MediaStreamConstraints = {
     width: { ideal: 1280, max: 1280 },
     height: { ideal: 720, max: 720 },
     frameRate: { ideal: 30, max: 30 },
-    facingMode: "user"
+    facingMode: 'user'
   },
   audio: {
     echoCancellation: true,
@@ -38,7 +38,7 @@ export const SCREEN_SHARE_CONSTRAINTS: DisplayMediaStreamOptions = {
     height: { ideal: 1080, max: 1080 },
     frameRate: { ideal: 24, max: 24 }
   },
-  audio: false  // Screen audio typically not needed
+  audio: false // Screen audio typically not needed
 };
 
 /**
@@ -46,7 +46,10 @@ export const SCREEN_SHARE_CONSTRAINTS: DisplayMediaStreamOptions = {
  * @param receiver RTCRtpReceiver to configure
  * @param delayHint Target playout delay in seconds (default: 0.2s)
  */
-export function setPlayoutDelayHint(receiver: RTCRtpReceiver, delayHint: number = 0.2): void {
+export function setPlayoutDelayHint(
+  receiver: RTCRtpReceiver,
+  delayHint: number = 0.2
+): void {
   if ('playoutDelayHint' in receiver) {
     (receiver as any).playoutDelayHint = delayHint;
   }
@@ -77,17 +80,17 @@ export function isChromium(): boolean {
 /**
  * Detect if browser supports scalability mode (SVC)
  * Chrome/Edge support it, Safari/iOS do not
- * 
+ *
  * Note: Chrome UA contains "Safari", so we need to check for Chrome/Chromium first
  */
 export function supportsScalabilityMode(): boolean {
   const ua = navigator.userAgent;
-  
+
   // Check if running on iOS (no SVC support)
   if (detectSafariIOS()) {
     return false;
   }
-  
+
   // Chrome/Chromium/Edge support scalability mode
   // Check for Chrome/Chromium first before Safari (since Chrome UA includes "Safari")
   return isChromium();
@@ -97,7 +100,7 @@ export function supportsScalabilityMode(): boolean {
  * Feature flags for codec selection
  */
 export const CODEC_FEATURES = {
-  enableAV1: false,  // AV1 disabled by default (limited browser support)
+  enableAV1: false // AV1 disabled by default (limited browser support)
 };
 
 /**
@@ -108,8 +111,8 @@ export const CODEC_FEATURES = {
  */
 export function getPreferredCodecs(): string[] {
   // TEMPORARY: Force H.264 for everyone until we fix black video issue
-  return ["video/H264"];
-  
+  return ['video/H264'];
+
   /* Original logic:
   const isIOS = detectSafariIOS();
   
@@ -131,7 +134,7 @@ export function getPreferredCodecs(): string[] {
  * TEMPORARY: For debugging black video issue
  */
 export function forceH264OnlySDP(sdp: string): string {
-  const lines = sdp.split('\r\n');
+  const lines = sdp.split(/\r?\n/);
   const output: string[] = [];
   let inVideoSection = false;
   const h264PayloadTypes: string[] = [];
@@ -140,7 +143,7 @@ export function forceH264OnlySDP(sdp: string): string {
   // First pass: find H.264 payload types and mark lines to skip
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
-    
+
     // Track when we're in video m= section
     if (line.startsWith('m=video')) {
       inVideoSection = true;
@@ -156,17 +159,26 @@ export function forceH264OnlySDP(sdp: string): string {
           h264PayloadTypes.push(match[1]);
         }
       }
-      
+
       // Mark non-H.264 codec lines for removal
-      if (line.includes('rtpmap') && (line.includes('VP8') || line.includes('VP9') || line.includes('AV1'))) {
+      if (
+        line.includes('rtpmap') &&
+        (line.includes('VP8') || line.includes('VP9') || line.includes('AV1'))
+      ) {
         const match = line.match(/rtpmap:(\d+)/);
         if (match) {
           linesToSkip.add(i);
           // Also skip associated fmtp and rtcp-fb lines
           for (let j = i + 1; j < lines.length; j++) {
-            if (lines[j].startsWith(`a=fmtp:${match[1]}`) || lines[j].startsWith(`a=rtcp-fb:${match[1]}`)) {
+            if (
+              lines[j].startsWith(`a=fmtp:${match[1]}`) ||
+              lines[j].startsWith(`a=rtcp-fb:${match[1]}`)
+            ) {
               linesToSkip.add(j);
-            } else if (lines[j].startsWith('a=rtpmap') || lines[j].startsWith('m=')) {
+            } else if (
+              lines[j].startsWith('a=rtpmap') ||
+              lines[j].startsWith('m=')
+            ) {
               break;
             }
           }
@@ -182,7 +194,7 @@ export function forceH264OnlySDP(sdp: string): string {
     }
 
     let line = lines[i];
-    
+
     // Filter m=video line to only include H.264 payload types
     if (line.startsWith('m=video') && h264PayloadTypes.length > 0) {
       const parts = line.split(' ');
@@ -190,7 +202,10 @@ export function forceH264OnlySDP(sdp: string): string {
         // Keep first 3 parts (m=video port proto) and only H.264 payload types
         const filtered = parts.slice(0, 3).concat(h264PayloadTypes);
         line = filtered.join(' ');
-        console.log('✅ SDP munged: m=video filtered to H.264 only:', h264PayloadTypes.join(','));
+        console.log(
+          '✅ SDP munged: m=video filtered to H.264 only:',
+          h264PayloadTypes.join(',')
+        );
       }
     }
 
@@ -207,37 +222,37 @@ export function forceH264OnlySDP(sdp: string): string {
 function rankCodecByProfile(codec: RTCRtpCodecCapability): number {
   const mime = codec.mimeType.toLowerCase();
   const fmtp = codec.sdpFmtpLine?.toLowerCase() || '';
-  
+
   if (mime === 'video/h264') {
     // Prefer Baseline Profile Level 3.1 (42e01f) - widely compatible
     // 42 = Baseline, e0 = Constrained, 1f = Level 3.1
-    if (fmtp.includes('profile-level-id=42e01f')) return 100;  // Exact match
-    if (fmtp.includes('profile-level-id=42c01f')) return 90;   // Constrained Baseline 3.1
-    if (fmtp.includes('profile-level-id=4200')) return 80;     // Baseline (any level)
-    if (fmtp.includes('profile-level-id=42e0')) return 70;     // Baseline variants
-    if (fmtp.includes('profile-level-id=42')) return 60;       // Baseline family
-    
+    if (fmtp.includes('profile-level-id=42e01f')) return 100; // Exact match
+    if (fmtp.includes('profile-level-id=42c01f')) return 90; // Constrained Baseline 3.1
+    if (fmtp.includes('profile-level-id=4200')) return 80; // Baseline (any level)
+    if (fmtp.includes('profile-level-id=42e0')) return 70; // Baseline variants
+    if (fmtp.includes('profile-level-id=42')) return 60; // Baseline family
+
     // Reject High/Main profiles and entries without profile-level-id
-    if (fmtp.includes('profile-level-id=64')) return -1;  // High Profile
-    if (fmtp.includes('profile-level-id=4d')) return -1;  // Main Profile
-    if (!fmtp.includes('profile-level-id')) return -1;    // Ambiguous
-    
-    return 50;  // Other baseline variants
+    if (fmtp.includes('profile-level-id=64')) return -1; // High Profile
+    if (fmtp.includes('profile-level-id=4d')) return -1; // Main Profile
+    if (!fmtp.includes('profile-level-id')) return -1; // Ambiguous
+
+    return 50; // Other baseline variants
   }
-  
+
   if (mime === 'video/vp9') {
     // Prefer Profile 0 (8-bit 4:2:0, most compatible)
-    if (fmtp.includes('profile-id=0')) return 100;  // Exact match
-    if (!fmtp.includes('profile-id')) return 80;    // Assume Profile 0 if not specified
-    
+    if (fmtp.includes('profile-id=0')) return 100; // Exact match
+    if (!fmtp.includes('profile-id')) return 80; // Assume Profile 0 if not specified
+
     // Reject Profile 1/2/3 (4:2:2, 4:4:4, 10/12-bit)
     if (fmtp.includes('profile-id=1')) return -1;
     if (fmtp.includes('profile-id=2')) return -1;
     if (fmtp.includes('profile-id=3')) return -1;
-    
+
     return 50;
   }
-  
+
   // For AV1 and other codecs, accept all variants
   return 100;
 }
@@ -255,7 +270,7 @@ export function setCodecPreferences(
   preferredCodecs: string[]
 ): void {
   const transceivers = pc.getTransceivers();
-  
+
   for (const transceiver of transceivers) {
     if (transceiver.receiver.track?.kind === kind) {
       const capabilities = RTCRtpReceiver.getCapabilities(kind);
@@ -268,24 +283,28 @@ export function setCodecPreferences(
       for (const preferredMime of preferredCodecs) {
         const matches = codecs
           .filter(c => c.mimeType.toLowerCase() === preferredMime.toLowerCase())
-          .map(c => ({ codec: c, rank: kind === 'video' ? rankCodecByProfile(c) : 100 }))
-          .filter(({ rank }) => rank >= 0)  // Reject negative ranks
-          .sort((a, b) => b.rank - a.rank)  // Sort by rank (descending)
+          .map(c => ({
+            codec: c,
+            rank: kind === 'video' ? rankCodecByProfile(c) : 100
+          }))
+          .filter(({ rank }) => rank >= 0) // Reject negative ranks
+          .sort((a, b) => b.rank - a.rank) // Sort by rank (descending)
           .map(({ codec }) => codec);
-        
+
         sortedCodecs.push(...matches);
       }
 
       // Add remaining codecs (with profile ranking for video)
       for (const codec of codecs) {
-        const alreadyAdded = sortedCodecs.some(c => 
-          c.mimeType === codec.mimeType && 
-          c.sdpFmtpLine === codec.sdpFmtpLine
+        const alreadyAdded = sortedCodecs.some(
+          c =>
+            c.mimeType === codec.mimeType && c.sdpFmtpLine === codec.sdpFmtpLine
         );
-        
+
         if (!alreadyAdded) {
           const rank = kind === 'video' ? rankCodecByProfile(codec) : 100;
-          if (rank >= 0) {  // Only add non-rejected codecs
+          if (rank >= 0) {
+            // Only add non-rejected codecs
             sortedCodecs.push(codec);
           }
         }
@@ -294,10 +313,15 @@ export function setCodecPreferences(
       if (sortedCodecs.length > 0 && transceiver.setCodecPreferences) {
         try {
           transceiver.setCodecPreferences(sortedCodecs);
-          const topCodecs = sortedCodecs.slice(0, 3).map(c => {
-            const fmtp = c.sdpFmtpLine ? ` (${c.sdpFmtpLine.substring(0, 50)})` : '';
-            return `${c.mimeType}${fmtp}`;
-          }).join(', ');
+          const topCodecs = sortedCodecs
+            .slice(0, 3)
+            .map(c => {
+              const fmtp = c.sdpFmtpLine
+                ? ` (${c.sdpFmtpLine.substring(0, 50)})`
+                : '';
+              return `${c.mimeType}${fmtp}`;
+            })
+            .join(', ');
           console.log(`✅ Codec preferences set for ${kind}: ${topCodecs}`);
         } catch (err) {
           console.warn(`⚠️  Failed to set codec preferences for ${kind}:`, err);
@@ -310,9 +334,9 @@ export function setCodecPreferences(
 /**
  * Add video track to peer connection
  * TEMPORARY: Simplified single-layer H.264 to debug black video issue
- * 
+ *
  * Reuses existing transceivers during renegotiation to avoid SDP bloat
- * 
+ *
  * @param pc RTCPeerConnection
  * @param videoTrack MediaStreamTrack (video)
  * @param stream MediaStream containing the track
@@ -325,7 +349,7 @@ export async function addVideoTrackWithSimulcast(
   contentHint: 'motion' | 'detail' | 'text' = 'motion'
 ): Promise<RTCRtpSender> {
   // TEMPORARY: Disable simulcast/SVC, use simple single-layer H.264
-  
+
   // Set contentHint on track for encoder optimization
   if ('contentHint' in videoTrack) {
     (videoTrack as any).contentHint = contentHint;
@@ -334,31 +358,32 @@ export async function addVideoTrackWithSimulcast(
   // Check for existing video transceiver to reuse (for renegotiation)
   const transceivers = pc.getTransceivers();
   const existingVideoTransceiver = transceivers.find(
-    t => t.receiver.track?.kind === 'video' && 
-         (!t.sender.track || t.sender.track.readyState === 'ended')
+    t =>
+      t.receiver.track?.kind === 'video' &&
+      (!t.sender.track || t.sender.track.readyState === 'ended')
   );
 
   let transceiver: RTCRtpTransceiver;
   let sender: RTCRtpSender;
-  
+
   if (existingVideoTransceiver) {
     // Reuse existing transceiver
     await existingVideoTransceiver.sender.replaceTrack(videoTrack);
-    existingVideoTransceiver.direction = "sendonly";
+    existingVideoTransceiver.direction = 'sendonly';
     transceiver = existingVideoTransceiver;
     sender = existingVideoTransceiver.sender;
-    console.log("✅ Reused existing video transceiver");
+    console.log('✅ Reused existing video transceiver');
   } else {
     // Create new transceiver with sendonly direction
     transceiver = pc.addTransceiver(videoTrack, {
-      direction: "sendonly",
+      direction: 'sendonly',
       streams: [stream]
     });
     sender = transceiver.sender;
-    console.log("✅ Created new video transceiver");
+    console.log('✅ Created new video transceiver');
   }
-  
-  console.log("[HOST] tx mid", transceiver.mid);
+
+  console.log('[HOST] tx mid', transceiver.mid);
   return sender;
 }
 
@@ -379,24 +404,24 @@ export interface BitrateProfile {
  */
 export const BITRATE_PROFILES: Record<QualityProfile, BitrateProfile> = {
   high: {
-    maxBitrate: 2_500_000,      // 2.5 Mbps
+    maxBitrate: 2_500_000, // 2.5 Mbps
     maxFramerate: 30,
-    scaleResolutionDownBy: 1.0   // Full resolution (720p)
+    scaleResolutionDownBy: 1.0 // Full resolution (720p)
   },
   medium: {
-    maxBitrate: 1_200_000,      // 1.2 Mbps
+    maxBitrate: 1_200_000, // 1.2 Mbps
     maxFramerate: 30,
-    scaleResolutionDownBy: 1.15  // Slight downscale
+    scaleResolutionDownBy: 1.15 // Slight downscale
   },
   low: {
-    maxBitrate: 600_000,        // 600 kbps
+    maxBitrate: 600_000, // 600 kbps
     maxFramerate: 24,
-    scaleResolutionDownBy: 1.5   // More aggressive downscale
+    scaleResolutionDownBy: 1.5 // More aggressive downscale
   },
   'screen-share': {
-    maxBitrate: 3_000_000,      // 3 Mbps for screen detail
-    maxFramerate: 24,            // Lower framerate for presentations
-    scaleResolutionDownBy: 1.0   // Full resolution (1080p)
+    maxBitrate: 3_000_000, // 3 Mbps for screen detail
+    maxFramerate: 24, // Lower framerate for presentations
+    scaleResolutionDownBy: 1.0 // Full resolution (1080p)
   }
 };
 
@@ -416,14 +441,14 @@ export async function applyBitrateProfile(
   for (const sender of senders) {
     if (sender.track?.kind === 'video') {
       const params = sender.getParameters();
-      
+
       if (!params.encodings || params.encodings.length === 0) {
         params.encodings = [{}];
       }
 
       // Detect simulcast (multiple encodings with RIDs)
-      const isSimulcast = params.encodings.length > 1 && 
-                          params.encodings.some(e => 'rid' in e);
+      const isSimulcast =
+        params.encodings.length > 1 && params.encodings.some(e => 'rid' in e);
 
       if (isSimulcast) {
         // Simulcast mode: Adjust all layers proportionally
@@ -433,8 +458,10 @@ export async function applyBitrateProfile(
           const layerScale = encoding.scaleResolutionDownBy || 1.0;
           // Higher scale = lower quality layer, so inverse relationship
           const bitrateMultiplier = 1.0 / (layerScale * layerScale);
-          
-          encoding.maxBitrate = Math.floor(config.maxBitrate * bitrateMultiplier);
+
+          encoding.maxBitrate = Math.floor(
+            config.maxBitrate * bitrateMultiplier
+          );
           encoding.maxFramerate = config.maxFramerate;
           // Keep existing scaleResolutionDownBy for each layer (set during addTransceiver)
         }
@@ -442,7 +469,8 @@ export async function applyBitrateProfile(
         // Single-layer mode: Use standard approach
         params.encodings[0].maxBitrate = config.maxBitrate;
         params.encodings[0].maxFramerate = config.maxFramerate;
-        params.encodings[0].scaleResolutionDownBy = config.scaleResolutionDownBy;
+        params.encodings[0].scaleResolutionDownBy =
+          config.scaleResolutionDownBy;
 
         // Add scalability mode for Chrome/Edge (L1T3 = 1 spatial layer, 3 temporal layers)
         // Only for single-layer (not simulcast - RID and scalabilityMode are mutually exclusive)
@@ -454,7 +482,9 @@ export async function applyBitrateProfile(
       try {
         await sender.setParameters(params);
         if (isSimulcast) {
-          console.log(`✅ Applied ${profile} profile to simulcast sender (${params.encodings.length} layers)`);
+          console.log(
+            `✅ Applied ${profile} profile to simulcast sender (${params.encodings.length} layers)`
+          );
         } else {
           console.log(`✅ Applied ${profile} profile to single-layer sender:`, {
             ...config,
@@ -472,13 +502,13 @@ export async function applyBitrateProfile(
  * Enable OPUS FEC and DTX in SDP for audio resilience
  * FEC (Forward Error Correction): Allows receiver to reconstruct lost packets
  * DTX (Discontinuous Transmission): Reduces bandwidth during silence
- * 
+ *
  * Call this on SDP before setLocalDescription/setRemoteDescription
  */
 export function enableOpusFecDtx(sdp: string): string {
   const lines = sdp.split('\r\n');
   let opusPayloadType: string | null = null;
-  
+
   // Find OPUS payload type
   for (const line of lines) {
     if (line.includes('opus/48000')) {
@@ -489,12 +519,12 @@ export function enableOpusFecDtx(sdp: string): string {
       }
     }
   }
-  
+
   if (!opusPayloadType) {
     console.warn('⚠️  OPUS codec not found in SDP');
     return sdp;
   }
-  
+
   // Find or create fmtp line for OPUS
   let fmtpLineIndex = -1;
   for (let i = 0; i < lines.length; i++) {
@@ -503,27 +533,39 @@ export function enableOpusFecDtx(sdp: string): string {
       break;
     }
   }
-  
+
   if (fmtpLineIndex >= 0) {
     // Update existing fmtp line
     let fmtp = lines[fmtpLineIndex];
-    if (!fmtp.includes('useinbandfec=')) {
+    // ensure useinbandfec=1 (append if missing, upgrade if 0)
+    if (fmtp.includes('useinbandfec=')) {
+      fmtp = fmtp.replace(/useinbandfec=\d/, 'useinbandfec=1');
+    } else {
       fmtp += ';useinbandfec=1';
     }
-    if (!fmtp.includes('usedtx=')) {
+
+    // ensure usedtx=1 (append if missing, upgrade if 0)
+    if (fmtp.includes('usedtx=')) {
+      fmtp = fmtp.replace(/usedtx=\d/, 'usedtx=1');
+    } else {
       fmtp += ';usedtx=1';
     }
+
     lines[fmtpLineIndex] = fmtp;
   } else {
     // Create new fmtp line (insert after rtpmap)
     for (let i = 0; i < lines.length; i++) {
       if (lines[i].includes(`rtpmap:${opusPayloadType}`)) {
-        lines.splice(i + 1, 0, `a=fmtp:${opusPayloadType} useinbandfec=1;usedtx=1`);
+        lines.splice(
+          i + 1,
+          0,
+          `a=fmtp:${opusPayloadType} useinbandfec=1;usedtx=1`
+        );
         break;
       }
     }
   }
-  
+
   const result = lines.join('\r\n');
   console.log('✅ OPUS FEC/DTX enabled (useinbandfec=1, usedtx=1)');
   return result;
@@ -535,23 +577,23 @@ export function enableOpusFecDtx(sdp: string): string {
  */
 export async function applyAudioQuality(
   pc: RTCPeerConnection,
-  maxBitrate: number = 96000,  // 64-96kbps for talking-head
+  maxBitrate: number = 96000, // 64-96kbps for talking-head
   priority: RTCPriorityType = 'high',
-  ptime: number = 20  // 20ms packet time
+  ptime: number = 20 // 20ms packet time
 ): Promise<void> {
   const senders = pc.getSenders();
 
   for (const sender of senders) {
     if (sender.track?.kind === 'audio') {
       const params = sender.getParameters();
-      
+
       if (!params.encodings || params.encodings.length === 0) {
         params.encodings = [{}];
       }
 
       params.encodings[0].maxBitrate = maxBitrate;
       params.encodings[0].priority = priority;
-      
+
       // Set ptime (packet time) for OPUS - 20ms is optimal for voice
       if ('ptime' in params.encodings[0]) {
         (params.encodings[0] as any).ptime = ptime;
@@ -559,7 +601,9 @@ export async function applyAudioQuality(
 
       try {
         await sender.setParameters(params);
-        console.log(`✅ Applied audio quality: ${maxBitrate}bps, priority: ${priority}, ptime: ${ptime}ms`);
+        console.log(
+          `✅ Applied audio quality: ${maxBitrate}bps, priority: ${priority}, ptime: ${ptime}ms`
+        );
       } catch (err) {
         console.warn(`⚠️  Failed to set audio parameters:`, err);
       }
@@ -640,7 +684,7 @@ export function setContentHint(
 /**
  * Request a keyframe from receiver (Chrome/Edge only)
  * Fallback to sender.generateKeyFrame() on Chromium
- * 
+ *
  * Use after:
  * - Guest approved / joined
  * - Renegotiation complete
@@ -650,7 +694,7 @@ export function setContentHint(
 export function requestKeyFrame(pc: RTCPeerConnection): void {
   let keyframeRequested = false;
   const receivers = pc.getReceivers();
-  
+
   // Try receiver.requestKeyFrame() first (preferred)
   for (const receiver of receivers) {
     if (receiver.track?.kind === 'video') {
@@ -695,7 +739,11 @@ export function requestKeyFrame(pc: RTCPeerConnection): void {
  */
 export function requestKeyFrameOnRecovery(
   pc: RTCPeerConnection,
-  reason: 'guest_joined' | 'renegotiation' | 'network_recovered' | 'viewer_joined'
+  reason:
+    | 'guest_joined'
+    | 'renegotiation'
+    | 'network_recovered'
+    | 'viewer_joined'
 ): void {
   console.log(`🔑 Requesting keyframe: ${reason}`);
   requestKeyFrame(pc);
@@ -728,17 +776,17 @@ export class AdaptiveQualityManager {
 
   // Frozen frame detection (per-stream tracking)
   private streamFrameTracking: Map<string, StreamFrameTracking> = new Map();
-  private readonly FROZEN_FRAME_THRESHOLD = 2000;  // 2 seconds without new frames
+  private readonly FROZEN_FRAME_THRESHOLD = 2000; // 2 seconds without new frames
 
   // Adaptation thresholds - smarter rules for stability
-  private readonly DEGRADE_THRESHOLD = 3;   // 3 ticks (~6s) of degraded
-  private readonly UPGRADE_THRESHOLD = 7;   // 7 ticks (~14s) of good (10-15s range)
-  private readonly MIN_DWELL_TIME = 8000;   // Min 8s dwell before next change (prevents ping-pong)
-  
+  private readonly DEGRADE_THRESHOLD = 3; // 3 ticks (~6s) of degraded
+  private readonly UPGRADE_THRESHOLD = 7; // 7 ticks (~14s) of good (10-15s range)
+  private readonly MIN_DWELL_TIME = 8000; // Min 8s dwell before next change (prevents ping-pong)
+
   // Transport stability: pause downshifts after connectivity events
   private downshiftPausedUntil: number = 0;
-  private readonly DOWNSHIFT_PAUSE_DURATION = 5000;  // 5 seconds
-  
+  private readonly DOWNSHIFT_PAUSE_DURATION = 5000; // 5 seconds
+
   // Candidate flip detection: track relay→srflx/host transitions
   private lastCandidatePairType: string | null = null;
 
@@ -757,7 +805,11 @@ export class AdaptiveQualityManager {
    * Update health status and adapt quality if needed
    * Call this from your existing health telemetry system
    */
-  updateHealth(health: HealthStatus, packetLoss: number = 0, fps: number = 0): void {
+  updateHealth(
+    health: HealthStatus,
+    packetLoss: number = 0,
+    fps: number = 0
+  ): void {
     this.state.healthStatus = health;
     this.lastFps = fps;
 
@@ -778,7 +830,11 @@ export class AdaptiveQualityManager {
       ) {
         this.downgradeQuality();
       } else if (now < this.downshiftPausedUntil) {
-        console.log(`⏸️  Downshift paused for transport stability (${Math.ceil((this.downshiftPausedUntil - now) / 1000)}s remaining)`);
+        console.log(
+          `⏸️  Downshift paused for transport stability (${Math.ceil(
+            (this.downshiftPausedUntil - now) / 1000
+          )}s remaining)`
+        );
       }
     } else if (health === 'good') {
       this.state.goodTicks++;
@@ -806,17 +862,17 @@ export class AdaptiveQualityManager {
   private async downgradeQuality(): Promise<void> {
     const profiles: QualityProfile[] = ['high', 'medium', 'low'];
     const currentIndex = profiles.indexOf(this.state.currentProfile);
-    
+
     if (currentIndex < profiles.length - 1) {
       this.state.currentProfile = profiles[currentIndex + 1];
       this.state.lastProfileChange = Date.now();
       this.state.degradedTicks = 0;
-      
+
       await applyBitrateProfile(this.pc, this.state.currentProfile);
-      
+
       // Audio-first strategy: prioritize audio when degraded
       await raiseAudioPriorityOnDegraded(this.pc, true);
-      
+
       console.log(`📉 Quality downgraded to: ${this.state.currentProfile}`);
     }
   }
@@ -827,17 +883,17 @@ export class AdaptiveQualityManager {
   private async upgradeQuality(): Promise<void> {
     const profiles: QualityProfile[] = ['high', 'medium', 'low'];
     const currentIndex = profiles.indexOf(this.state.currentProfile);
-    
+
     if (currentIndex > 0) {
       this.state.currentProfile = profiles[currentIndex - 1];
       this.state.lastProfileChange = Date.now();
       this.state.goodTicks = 0;
-      
+
       await applyBitrateProfile(this.pc, this.state.currentProfile);
-      
+
       // Restore normal audio priority when upgraded
       await raiseAudioPriorityOnDegraded(this.pc, false);
-      
+
       console.log(`📈 Quality upgraded to: ${this.state.currentProfile}`);
     }
   }
@@ -851,7 +907,7 @@ export class AdaptiveQualityManager {
   checkFrozenFrames(streamId: string, framesDecoded: number): void {
     const now = Date.now();
     const tracking = this.streamFrameTracking.get(streamId);
-    
+
     if (!tracking) {
       // First time seeing this stream, initialize tracking
       this.streamFrameTracking.set(streamId, {
@@ -860,7 +916,7 @@ export class AdaptiveQualityManager {
       });
       return;
     }
-    
+
     // Handle counter reset (new SSRC after renegotiation)
     if (framesDecoded < tracking.framesDecoded) {
       // Counter reset detected, restart tracking
@@ -870,7 +926,7 @@ export class AdaptiveQualityManager {
       });
       return;
     }
-    
+
     if (framesDecoded > tracking.framesDecoded) {
       // Frames are progressing, update tracking
       this.streamFrameTracking.set(streamId, {
@@ -880,9 +936,16 @@ export class AdaptiveQualityManager {
     } else if (framesDecoded === tracking.framesDecoded) {
       // Frames are stalled (including zero-frame streams), check if threshold exceeded
       const stallDuration = now - tracking.lastUpdateTime;
-      
+
       if (stallDuration >= this.FROZEN_FRAME_THRESHOLD) {
-        console.warn(`⚠️  Frozen frame detected on stream ${streamId.substring(0, 8)} (${Math.floor(stallDuration/1000)}s stall at ${framesDecoded} frames), requesting keyframe`);
+        console.warn(
+          `⚠️  Frozen frame detected on stream ${streamId.substring(
+            0,
+            8
+          )} (${Math.floor(
+            stallDuration / 1000
+          )}s stall at ${framesDecoded} frames), requesting keyframe`
+        );
         requestKeyFrame(this.pc);
         // Reset timer to avoid spamming keyframe requests
         this.streamFrameTracking.set(streamId, {
@@ -907,7 +970,9 @@ export class AdaptiveQualityManager {
    */
   pauseDownshifts(duration: number = this.DOWNSHIFT_PAUSE_DURATION): void {
     this.downshiftPausedUntil = Date.now() + duration;
-    console.log(`⏸️  Downshifts paused for ${duration / 1000}s (transport stability)`);
+    console.log(
+      `⏸️  Downshifts paused for ${duration / 1000}s (transport stability)`
+    );
   }
 
   /**
@@ -918,29 +983,50 @@ export class AdaptiveQualityManager {
   async detectCandidateFlips(): Promise<void> {
     try {
       const stats = await this.pc.getStats();
-      
+
       for (const report of stats.values()) {
-        if (report.type === 'candidate-pair' && report.state === 'succeeded' && report.nominated) {
+        if (
+          report.type === 'candidate-pair' &&
+          report.state === 'succeeded' &&
+          report.nominated
+        ) {
           // Found the active candidate pair
           const localCandidate = stats.get(report.localCandidateId);
           const remoteCandidate = stats.get(report.remoteCandidateId);
-          
+
           if (!localCandidate || !remoteCandidate) continue;
-          
+
           // Determine candidate pair type (relay, srflx, or host)
-          const candidateType = localCandidate.candidateType || remoteCandidate.candidateType;
-          
-          if (this.lastCandidatePairType && this.lastCandidatePairType !== candidateType) {
+          const candidateType =
+            localCandidate.candidateType || remoteCandidate.candidateType;
+
+          if (
+            this.lastCandidatePairType &&
+            this.lastCandidatePairType !== candidateType
+          ) {
             // Candidate flip detected!
-            if (this.lastCandidatePairType === 'relay' && (candidateType === 'srflx' || candidateType === 'host')) {
-              console.log(`🔄 Candidate flip: relay → ${candidateType} (TURN fallback → direct/STUN)`);
-            } else if ((this.lastCandidatePairType === 'srflx' || this.lastCandidatePairType === 'host') && candidateType === 'relay') {
-              console.log(`🔄 Candidate flip: ${this.lastCandidatePairType} → relay (direct/STUN → TURN fallback)`);
+            if (
+              this.lastCandidatePairType === 'relay' &&
+              (candidateType === 'srflx' || candidateType === 'host')
+            ) {
+              console.log(
+                `🔄 Candidate flip: relay → ${candidateType} (TURN fallback → direct/STUN)`
+              );
+            } else if (
+              (this.lastCandidatePairType === 'srflx' ||
+                this.lastCandidatePairType === 'host') &&
+              candidateType === 'relay'
+            ) {
+              console.log(
+                `🔄 Candidate flip: ${this.lastCandidatePairType} → relay (direct/STUN → TURN fallback)`
+              );
             } else {
-              console.log(`🔄 Candidate flip: ${this.lastCandidatePairType} → ${candidateType}`);
+              console.log(
+                `🔄 Candidate flip: ${this.lastCandidatePairType} → ${candidateType}`
+              );
             }
           }
-          
+
           this.lastCandidatePairType = candidateType;
           break; // Only one active pair
         }
@@ -959,7 +1045,7 @@ export class AdaptiveQualityManager {
       this.state.lastProfileChange = Date.now();
       this.state.degradedTicks = 0;
       this.state.goodTicks = 0;
-      
+
       applyBitrateProfile(this.pc, profile);
       console.log(`🎯 Quality manually set to: ${profile}`);
     }
@@ -1017,7 +1103,7 @@ export const SCENE_PROFILES: Record<SceneProfile, SceneConstraints> = {
     },
     audio: {
       echoCancellation: true,
-      noiseSuppression: false,  // Preserve audio fidelity for presentations
+      noiseSuppression: false, // Preserve audio fidelity for presentations
       autoGainControl: false
     },
     bitrateProfile: 'high',
@@ -1038,7 +1124,7 @@ export const SCENE_PROFILES: Record<SceneProfile, SceneConstraints> = {
     bitrateProfile: 'medium',
     contentHint: 'motion',
     degradationPreference: 'maintain-framerate',
-    maxBitrateCap: 1_000_000  // Cap High at 1 Mbps, start at Medium
+    maxBitrateCap: 1_000_000 // Cap High at 1 Mbps, start at Medium
   }
 };
 
@@ -1052,10 +1138,10 @@ export async function applySceneProfile(
   scene: SceneProfile
 ): Promise<void> {
   const config = SCENE_PROFILES[scene];
-  
+
   // Apply bitrate profile
   await applyBitrateProfile(pc, config.bitrateProfile);
-  
+
   // Apply bitrate cap for data-saver
   if (scene === 'data-saver' && config.maxBitrateCap) {
     const senders = pc.getSenders();
@@ -1073,15 +1159,15 @@ export async function applySceneProfile(
       }
     }
   }
-  
+
   // Set content hint on video tracks
   localStream.getVideoTracks().forEach(track => {
     setContentHint(track, config.contentHint);
   });
-  
+
   // Set degradation preference
   setDegradationPreference(pc, config.degradationPreference);
-  
+
   console.log(`✅ Applied scene profile: ${scene}`, config);
 }
 
@@ -1097,10 +1183,10 @@ export function getPlatformConstraints(): MediaStreamConstraints {
   if (detectSafariIOS()) {
     return {
       video: {
-        width: { ideal: 1280 },  // Use ideal, not max (avoid exact match issues)
+        width: { ideal: 1280 }, // Use ideal, not max (avoid exact match issues)
         height: { ideal: 720 },
         frameRate: { ideal: 30, max: 30 },
-        facingMode: "user"
+        facingMode: 'user'
       },
       audio: {
         echoCancellation: true,
@@ -1109,7 +1195,7 @@ export function getPlatformConstraints(): MediaStreamConstraints {
       }
     };
   }
-  
+
   return MEDIA_CONSTRAINTS;
 }
 
@@ -1133,7 +1219,7 @@ function calculateHealth(stats: ConnectionStats): HealthStatus {
   const { packetLoss, rtt, bitrate } = stats;
 
   // Poor: High packet loss or very high RTT
-  if (packetLoss > 0.10 || rtt > 500) {
+  if (packetLoss > 0.1 || rtt > 500) {
     return 'poor';
   }
 
@@ -1189,9 +1275,13 @@ export function startHealthMonitoring(
             lastTimestamp = now;
           }
 
-          if (report.packetsLost !== undefined && report.packetsReceived !== undefined) {
+          if (
+            report.packetsLost !== undefined &&
+            report.packetsReceived !== undefined
+          ) {
             const totalPackets = report.packetsLost + report.packetsReceived;
-            currentStats.packetLoss = totalPackets > 0 ? report.packetsLost / totalPackets : 0;
+            currentStats.packetLoss =
+              totalPackets > 0 ? report.packetsLost / totalPackets : 0;
           }
 
           if (report.jitter !== undefined) {
@@ -1242,11 +1332,14 @@ export function startHealthMonitoring(
 
       // Calculate health and update quality manager with FPS
       const health = calculateHealth(currentStats);
-      qualityManager.updateHealth(health, currentStats.packetLoss, currentStats.frameRate);
+      qualityManager.updateHealth(
+        health,
+        currentStats.packetLoss,
+        currentStats.frameRate
+      );
 
       // Detect relay→srflx/host candidate flips for transport observability
       await qualityManager.detectCandidateFlips();
-
     } catch (err) {
       console.warn('⚠️  Health monitoring error:', err);
     }
@@ -1276,33 +1369,33 @@ export async function initializeQualitySettings(
   // 1. Set codec preferences
   const preferredCodecs = getPreferredCodecs();
   setCodecPreferences(pc, 'video', preferredCodecs);
-  
+
   // 2. Apply initial bitrate profile
   await applyBitrateProfile(pc, initialProfile);
-  
+
   // 3. Apply audio quality
   await applyAudioQuality(pc);
-  
+
   // 4. Set degradation preference (balanced for talking heads)
   setDegradationPreference(pc, 'balanced');
-  
+
   // 5. Set content hints on tracks
   localStream.getVideoTracks().forEach(track => {
     setContentHint(track, 'motion');
   });
-  
+
   // 6. Create quality manager
   const qualityManager = new AdaptiveQualityManager(pc, initialProfile);
-  
+
   // 7. Start health monitoring if requested
   let stopMonitoring: (() => void) | null = null;
   if (startMonitoring) {
     stopMonitoring = startHealthMonitoring(pc, qualityManager);
   }
-  
+
   // 8. Connection optimizations
   checkTWCCSupport(); // Log TWCC support status
-  
+
   console.log('✅ WebRTC quality settings initialized');
   return { qualityManager, stopMonitoring };
 }
@@ -1318,17 +1411,17 @@ export async function reapplyQualitySettings(
   // 1. Set codec preferences again
   const preferredCodecs = getPreferredCodecs();
   setCodecPreferences(pc, 'video', preferredCodecs);
-  
+
   // 2. Reapply current bitrate profile
   const currentProfile = qualityManager.getCurrentProfile();
   await applyBitrateProfile(pc, currentProfile);
-  
+
   // 3. Reapply audio quality
   await applyAudioQuality(pc);
-  
+
   // 4. Set degradation preference
   setDegradationPreference(pc, 'balanced');
-  
+
   console.log('✅ Quality settings reapplied after renegotiation');
 }
 
@@ -1340,7 +1433,7 @@ export async function reapplyQualitySettings(
  * Check if TWCC (Transport Wide Congestion Control) is supported/enabled
  * TWCC provides better congestion control by allowing receivers to send feedback
  * about all packets, not just key frames
- * 
+ *
  * Returns true if TWCC extension is found in sender capabilities
  */
 export function checkTWCCSupport(): boolean {
@@ -1349,14 +1442,16 @@ export function checkTWCCSupport(): boolean {
     if (!capabilities || !capabilities.headerExtensions) {
       return false;
     }
-    
+
     // Look for TWCC header extension
     // URI: http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01
-    const twccExtension = capabilities.headerExtensions.find(ext => 
-      ext.uri === 'http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01' ||
-      ext.uri.includes('transport-wide-cc-extensions')
+    const twccExtension = capabilities.headerExtensions.find(
+      ext =>
+        ext.uri ===
+          'http://www.ietf.org/id/draft-holmer-rmcat-transport-wide-cc-extensions-01' ||
+        ext.uri.includes('transport-wide-cc-extensions')
     );
-    
+
     if (twccExtension) {
       console.log('✅ TWCC (Transport Wide Congestion Control) is supported');
       return true;
@@ -1382,16 +1477,16 @@ export async function restartICE(
 ): Promise<void> {
   try {
     console.log('🔄 Restarting ICE candidate gathering');
-    
+
     // Pause downshifts for transport stability
     if (qualityManager) {
       qualityManager.pauseDownshifts(5000);
     }
-    
+
     // Create offer with iceRestart flag
     const offer = await pc.createOffer({ iceRestart: true });
     await pc.setLocalDescription(offer);
-    
+
     console.log('✅ ICE restart initiated');
   } catch (err) {
     console.error('❌ ICE restart failed:', err);
@@ -1401,13 +1496,13 @@ export async function restartICE(
 /**
  * Create a wrapper for ICE candidate handler that stops forwarding candidates
  * after successful connection
- * 
+ *
  * This reduces server load and network traffic by preventing unnecessary candidates
  * after the connection is stable
- * 
+ *
  * NOTE: This utility function is available but not yet integrated into Host/Viewer/TestHarness.
  * Integration requires refactoring onicecandidate handlers in those files to use this wrapper.
- * 
+ *
  * Example usage (when integrating):
  * ```
  * const cleanup = setupOptimizedCandidateHandler(
@@ -1418,7 +1513,7 @@ export async function restartICE(
  *   'viewer-123'
  * );
  * ```
- * 
+ *
  * @param pc RTCPeerConnection to monitor
  * @param onCandidate Callback to forward candidates (e.g., send via WebSocket)
  * @param label Optional label for logging
@@ -1430,34 +1525,45 @@ export function setupOptimizedCandidateHandler(
   label: string = 'peer'
 ): () => void {
   let shouldForwardCandidates = true;
-  
+
   // Handle ICE candidates
   const candidateHandler = (event: RTCPeerConnectionIceEvent) => {
     if (event.candidate && shouldForwardCandidates) {
       onCandidate(event.candidate);
     } else if (event.candidate && !shouldForwardCandidates) {
-      console.log(`🔌 ${label}: Suppressing candidate after connection established`);
+      console.log(
+        `🔌 ${label}: Suppressing candidate after connection established`
+      );
     }
   };
-  
+
   // Monitor connection state
   const stateHandler = () => {
     const state = pc.connectionState;
-    
+
     // Once connected, stop forwarding new candidates
     if (state === 'connected' && shouldForwardCandidates) {
       shouldForwardCandidates = false;
-      console.log(`🔌 ${label}: Connection established, stopping candidate forwarding to save bandwidth`);
-    } else if ((state === 'connecting' || state === 'failed' || state === 'disconnected') && !shouldForwardCandidates) {
+      console.log(
+        `🔌 ${label}: Connection established, stopping candidate forwarding to save bandwidth`
+      );
+    } else if (
+      (state === 'connecting' ||
+        state === 'failed' ||
+        state === 'disconnected') &&
+      !shouldForwardCandidates
+    ) {
       // Re-enable if connection is restarting or degrading (ICE restart support)
       shouldForwardCandidates = true;
-      console.log(`⚠️  ${label}: Connection ${state}, re-enabling candidate forwarding for ICE restart/recovery`);
+      console.log(
+        `⚠️  ${label}: Connection ${state}, re-enabling candidate forwarding for ICE restart/recovery`
+      );
     }
   };
-  
+
   pc.addEventListener('icecandidate', candidateHandler);
   pc.addEventListener('connectionstatechange', stateHandler);
-  
+
   // Return cleanup function
   return () => {
     pc.removeEventListener('icecandidate', candidateHandler);
