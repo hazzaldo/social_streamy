@@ -7,7 +7,14 @@ import vitest from 'eslint-plugin-vitest';
 
 export default [
   // 1) Ignore build artefacts
-  { ignores: ['dist/**', 'coverage/**', '**/node_modules/**'] },
+  {
+    ignores: [
+      'dist/**',
+      'coverage/**',
+      'client/coverage/**',
+      '**/node_modules/**'
+    ]
+  },
 
   // 2) Base JS rules
   {
@@ -16,9 +23,7 @@ export default [
     ...js.configs.recommended
   },
 
-  // 3) TypeScript (parser + rules via typescript-eslint)
-  //    This is the non type-aware preset (fast). If you want type-aware later,
-  //    switch to `...tseslint.configs.recommendedTypeChecked` and add project: tsconfig.
+  // 3) TypeScript rules (fast preset)
   ...tseslint.configs.recommended,
 
   // 4) React (JSX runtime auto, version detect)
@@ -26,7 +31,7 @@ export default [
     ...react.configs.flat.recommended,
     settings: { react: { version: 'detect' } },
     rules: {
-      // Soften or temporarily disable strict rules
+      // Soft defaults so you can iterate quickly
       '@typescript-eslint/no-explicit-any': 'off',
       '@typescript-eslint/no-unused-vars': [
         'warn',
@@ -38,11 +43,14 @@ export default [
     }
   },
 
-  // 5) Tests — give Vitest globals and rules only in test files
+  // 5) Tests — Vitest globals + rules only for test files
   {
     files: ['**/__tests__/**/*', '**/*.{test,spec}.?(c|m)[jt]s?(x)'],
     plugins: { vitest },
     rules: vitest.configs.recommended.rules,
-    languageOptions: { globals: globals.vitest }
+    languageOptions: {
+      // Give tests both browser globals and Vitest globals (vi, describe, it, expect, etc.)
+      globals: { ...globals.browser, ...vitest.environments.env.globals }
+    }
   }
 ];
