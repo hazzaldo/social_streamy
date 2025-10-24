@@ -1253,7 +1253,7 @@ export function startHealthMonitoring(
   const intervalId = setInterval(async () => {
     try {
       const stats = await pc.getStats();
-      let currentStats: ConnectionStats = {
+      const currentStats: ConnectionStats = {
         bitrate: 0,
         packetLoss: 0,
         rtt: 0,

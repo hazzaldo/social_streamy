@@ -17,7 +17,9 @@
     "test:ui": "vitest --ui",
     "test:watch": "vitest --watch",
     "test:run": "vitest run",
-    "test:cov": "vitest --run --coverage"
+    "test:cov": "vitest --run --coverage",
+    "lint": "eslint . --ext .js,.mjs,.cjs,.ts,.tsx",
+    "lint:fix": "eslint . --ext .js,.mjs,.cjs,.ts,.tsx --fix"
   },
   "dependencies": {
     "@hookform/resolvers": "^3.10.0",
@@ -85,6 +87,7 @@
     "zod-validation-error": "^3.4.0"
   },
   "devDependencies": {
+    "@eslint/js": "^9.38.0",
     "@replit/vite-plugin-cartographer": "^0.3.1",
     "@replit/vite-plugin-dev-banner": "^0.1.1",
     "@replit/vite-plugin-runtime-error-modal": "^0.0.3",
@@ -108,11 +111,16 @@
     "concurrently": "^9.2.1",
     "drizzle-kit": "^0.31.4",
     "esbuild": "^0.25.0",
+    "eslint": "^9.38.0",
+    "eslint-plugin-react": "^7.37.5",
+    "eslint-plugin-vitest": "^0.5.4",
+    "globals": "^16.4.0",
     "jsdom": "^27.0.1",
     "postcss": "^8.4.47",
     "tailwindcss": "^3.4.17",
     "tsx": "^4.20.5",
     "typescript": "5.6.3",
+    "typescript-eslint": "^8.46.2",
     "vite": "^5.4.20",
     "vitest": "^3.2.4",
     "whatwg-fetch": "^3.6.20"
