@@ -24,6 +24,11 @@ import { DebugHUD } from '@/components/DebugHUD';
 
 import { hostSend, attachPcDebug, HLOG, HWARN, HERR } from '@/lib/rtc-debug';
 
+void attachPcDebug;
+void HLOG;
+void HWARN;
+void HERR;
+
 function wsUrl(path = '/ws') {
   const { protocol, host } = window.location;
   const wsProto = protocol === 'https:' ? 'wss:' : 'ws:';
@@ -264,7 +269,7 @@ export default function Viewer() {
         fromUserId: userId,
         sdp: offer
       });
-    } catch (error) {
+    } catch {
       toast({
         title: 'Camera Error',
         description: 'Could not access camera/microphone',

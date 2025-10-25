@@ -1,4 +1,0 @@
-dist/**
-coverage/**
-client/coverage/**
-**/node_modules/**

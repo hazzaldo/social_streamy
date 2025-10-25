@@ -196,7 +196,6 @@ export class MessageRouter {
     // SDP logging guard
     if (!this.debugSdp && (message.type === 'offer' || message.type === 'answer' || message.type === 'cohost_offer' || message.type === 'cohost_answer')) {
       // Don't log SDP in production
-      const sanitized = { ...message, sdp: '[REDACTED]' };
       return { valid: true, hasSchema: true };
     }
 

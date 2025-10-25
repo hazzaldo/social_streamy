@@ -279,7 +279,7 @@ export default function TestHarness() {
       let data: ServerMsg | any;
       try {
         data = JSON.parse(evt.data);
-      } catch (e) {
+      } catch {
         console.warn('WS non-JSON message', evt.data);
         return;
       }
@@ -1581,6 +1581,13 @@ export default function TestHarness() {
     return currentFrames > prevFrames;
   }
 
+  if (typeof window !== 'undefined') {
+    const globalWindow = window as any;
+    globalWindow.harnessAssertBitrate = assertBitrate;
+    globalWindow.harnessAssertRTT = assertRTT;
+    globalWindow.harnessAssertFramesIncreasing = assertFramesIncreasing;
+  }
+
   function assertUsingTURN(stats: ConnectionStats): boolean {
     return stats.usingTurn || stats.candidateType === 'relay';
   }
@@ -2418,7 +2425,7 @@ export default function TestHarness() {
       const stat = stats[0]; // Check first connection
       const bitrateKbps = stat.outboundBitrate || stat.inboundBitrate;
       const fps = stat.frameRate;
-      const [width, height] = stat.resolution.split('x').map(Number);
+      const [, height] = stat.resolution.split('x').map(Number);
       
       const minBitrate = 600; // kbps
       const minFps = 20;

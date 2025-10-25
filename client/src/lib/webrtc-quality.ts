@@ -84,8 +84,6 @@ export function isChromium(): boolean {
  * Note: Chrome UA contains "Safari", so we need to check for Chrome/Chromium first
  */
 export function supportsScalabilityMode(): boolean {
-  const ua = navigator.userAgent;
-
   // Check if running on iOS (no SVC support)
   if (detectSafariIOS()) {
     return false;
@@ -219,7 +217,7 @@ export function forceH264OnlySDP(sdp: string): string {
  * Rank codec by profile quality score (higher = better)
  * Returns -1 to reject, 0+ to accept with priority
  */
-function rankCodecByProfile(codec: RTCRtpCodecCapability): number {
+function rankCodecByProfile(codec: RTCRtpCodec): number {
   const mime = codec.mimeType.toLowerCase();
   const fmtp = codec.sdpFmtpLine?.toLowerCase() || '';
 
@@ -277,7 +275,7 @@ export function setCodecPreferences(
       if (!capabilities) continue;
 
       const codecs = capabilities.codecs;
-      const sortedCodecs: RTCRtpCodecCapability[] = [];
+      const sortedCodecs: RTCRtpCodec[] = [];
 
       // Add preferred codecs first (with profile ranking for video)
       for (const preferredMime of preferredCodecs) {
@@ -1031,7 +1029,7 @@ export class AdaptiveQualityManager {
           break; // Only one active pair
         }
       }
-    } catch (err) {
+    } catch {
       // Silently fail - this is just observability
     }
   }

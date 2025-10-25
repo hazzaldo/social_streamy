@@ -329,11 +329,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       // Helper functions for both router and legacy paths
       // Helper function to send message with backpressure check and ack
-      const sendMessage = (
-        targetWs: WebSocket,
-        message: any,
-        critical: boolean = true
-      ) => {
+      const sendMessage = (targetWs: WebSocket, message: any) => {
         if (targetWs.readyState !== WebSocket.OPEN) return false;
 
         // Check backpressure
@@ -355,29 +351,21 @@ export async function registerRoutes(app: Express): Promise<Server> {
       // Send acknowledgment for critical messages
       const sendAck = (msgId: string) => {
         if (msgId) {
-          sendMessage(
-            ws,
-            {
-              type: 'ack',
-              for: msgId,
-              ts: Date.now()
-            },
-            true
-          );
+          sendMessage(ws, {
+            type: 'ack',
+            for: msgId,
+            ts: Date.now()
+          });
         }
       };
 
       // Send normalized error response
       const sendError = (code: string, message: string) => {
-        sendMessage(
-          ws,
-          {
-            type: 'error',
-            code,
-            message
-          },
-          true
-        );
+        sendMessage(ws, {
+          type: 'error',
+          code,
+          message
+        });
       };
 
       // Helper functions for routing (used by both router and legacy)
@@ -1386,7 +1374,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
         case 'game_event': {
           // Phase 5: Guest/Viewer sends game event to host
-          const { streamId, type: eventType, payload, from } = msg;
+          const { streamId, type: eventType, payload } = msg;
           if (!streamId || !eventType) {
             sendMessage(ws, {
               type: 'game_error',

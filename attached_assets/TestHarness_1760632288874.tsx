@@ -2,7 +2,7 @@
 // Minimal host/viewer WebRTC harness with explicit logs and message shapes.
 // Route at /harness. Attach this component in your router.
 
-import React, { useEffect, useMemo, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 
 function wsUrl(path = '/ws') {
   const { protocol, host } = window.location; // e.g., https://<repl>.replit.dev
@@ -121,7 +121,7 @@ export default function TestHarness() {
       let data: ServerMsg | any;
       try {
         data = JSON.parse(evt.data);
-      } catch (e) {
+      } catch {
         console.warn('WS non-JSON message', evt.data);
         return;
       }

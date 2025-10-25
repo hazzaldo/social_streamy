@@ -1,5 +1,5 @@
 import { WebSocket } from 'ws';
-import { MessageHandler, MessageContext } from './message-router';
+import { MessageHandler } from './message-router';
 
 type Participant = {
   ws: WebSocket;
@@ -25,11 +25,7 @@ type Participant = {
  */
 
 // Helper to send message with backpressure check
-function sendMessage(
-  ws: WebSocket,
-  message: any,
-  critical: boolean = true
-): boolean {
+function sendMessage(ws: WebSocket, message: any): boolean {
   if (ws.readyState !== WebSocket.OPEN) return false;
 
   try {
@@ -359,7 +355,6 @@ export const handleWebRTCOffer: MessageHandler = async (ws, msg, context) => {
     currentParticipant,
     relayToUser,
     sendAck: ack,
-    metrics,
     debugSdp
   } = context;
 
@@ -417,7 +412,7 @@ export const handleWebRTCOffer: MessageHandler = async (ws, msg, context) => {
  */
 export const handleWebRTCAnswer: MessageHandler = async (ws, msg, context) => {
   const { toUserId, fromUserId, sdp } = msg;
-  const { relayToUser, sendAck: ack, metrics, debugSdp } = context;
+  const { relayToUser, sendAck: ack, debugSdp } = context;
 
   if (!debugSdp) {
     console.log('📤 [Wave1] Relaying webrtc_answer', {

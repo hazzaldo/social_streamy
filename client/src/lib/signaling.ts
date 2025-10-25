@@ -96,7 +96,7 @@ export class SignalingClient {
         this.ws.onclose = () => {
           console.log('🔌 SignalingClient disconnected');
           // Clean up pending acks
-          for (const [msgId, pending] of Array.from(this.pendingAcks.entries())) {
+          for (const pending of this.pendingAcks.values()) {
             if (pending.timeoutId) {
               clearTimeout(pending.timeoutId);
             }
