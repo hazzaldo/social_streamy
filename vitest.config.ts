@@ -1,4 +1,6 @@
 // vitest.config.ts
+process.env.NODE_ENV = 'test';
+
 import { defineConfig } from 'vitest/config';
 import path from 'path';
 
@@ -16,8 +18,9 @@ export default defineConfig({
 
   test: {
     environment: 'jsdom',
-    globals: true, // 👈 // gives you global `expect`, `vi`, etc.
-    setupFiles: ['./src/test/setup.ts'], // 👈 load jest-dom once for all tests
+    globals: true, // 👈 gives you global `expect`, `vi`, etc.
+    globalSetup: ['./vitest.global-setup.ts'],
+    setupFiles: ['./src/test/setup.ts'], // load browser-like helpers once
     coverage: {
       provider: 'v8',
       reporter: ['text', 'html', 'lcov'],
