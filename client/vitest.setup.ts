@@ -1,4 +1,4 @@
-// vitest.setup.ts
+// client/vitest.setup.ts
 
 // Extend expect() with jest-dom matchers
 import '@testing-library/jest-dom/vitest';
