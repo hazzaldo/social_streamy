@@ -3,7 +3,6 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { useToast } from '@/hooks/use-toast';
-import { SignalingClient } from '@/lib/signaling';
 import { wsUrl } from '@/lib/wsUrl';
 
 interface TestResult {

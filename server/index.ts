@@ -1,6 +1,6 @@
 import express, { type Request, Response, NextFunction } from 'express';
 import { registerRoutes } from './routes';
-import { setupVite, serveStatic, log } from './vite';
+import { serveStatic, log } from './vite';
 import { corsMiddleware, securityHeadersMiddleware } from './security';
 
 const app = express();

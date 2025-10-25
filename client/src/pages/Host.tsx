@@ -33,6 +33,12 @@ function wsUrl(path = '/ws') {
   return `${wsProto}//${host}${path}`;
 }
 
+// Touch debug helpers so lint/bundlers retain them for quick inspection.
+void attachPcDebug;
+void HLOG;
+void HWARN;
+void HERR;
+
 const ICE_CONFIG: RTCConfiguration = {
   iceServers: [
     { urls: ['stun:stun.l.google.com:19302'] },
@@ -67,7 +73,7 @@ export default function Host() {
 
   const [isLive, setIsLive] = useState(false);
   const [wsConnected, setWsConnected] = useState(false);
-  const [localStream, setLocalStream] = useState<MediaStream | null>(null);
+  const [, setLocalStream] = useState<MediaStream | null>(null);
   const [viewerCount, setViewerCount] = useState(0);
   const [isReconnecting, setIsReconnecting] = useState(false);
 
@@ -750,7 +756,7 @@ export default function Host() {
               8
             )}`
           );
-        } catch (err) {
+        } catch {
           // Ignore errors - some browsers don't support this
         }
       }
@@ -1031,7 +1037,7 @@ export default function Host() {
         title: "You're Live!",
         description: 'Share the viewer link to invite people'
       });
-    } catch (error) {
+    } catch {
       toast({
         title: 'Camera Error',
         description: 'Could not access camera/microphone',
